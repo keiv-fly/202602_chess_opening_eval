@@ -1,7 +1,6 @@
 import { Chess } from 'chess.js';
+import cliProgress from 'cli-progress';
 import * as dotenv from 'dotenv';
-import { createWriteStream } from 'node:fs';
-import { resolve } from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { renderBoard } from './board.js';
@@ -15,19 +14,19 @@ dotenv.config();
 
 class App {
   private readonly cache = new SessionCache();
-  private transientStatusVisible = false;
-  private readonly playerStreamFile = createWriteStream(resolve(process.cwd(), 'player.ndjson'), {
-    flags: 'a',
-    encoding: 'utf8',
-  });
   private readonly lichessClient = new LichessClient(
     fetch,
     undefined,
     (message) => this.logStatus(message),
-    (line) => this.writePlayerLine(line),
+    undefined,
+    undefined,
+    undefined,
+    (loadedGames, totalGames, done) => this.updateLichessDumpProgress(loadedGames, totalGames, done),
   );
   private readonly chessComClient = new ChessComClient(fetch, undefined, (message) => this.logStatus(message));
   private readonly history: string[] = [];
+  private lichessDumpProgress: cliProgress.SingleBar | null = null;
+  private lichessDumpProgressTotal = 0;
 
   async run(): Promise<void> {
     const rl = readline.createInterface({ input, output });
@@ -107,32 +106,43 @@ class App {
 
   private logStatus(message: string): void {
     const formatted = `Status: ${message}`;
-    const isPlayerStreamTick = message.startsWith('Network: /player stream ');
-
-    if (isPlayerStreamTick && output.isTTY) {
-      output.write(`\r\x1b[2K${formatted}`);
-      this.transientStatusVisible = true;
-      return;
-    }
-
     this.logLine(formatted);
   }
 
   private logLine(message: string): void {
-    if (this.transientStatusVisible && output.isTTY) {
-      output.write('\r\x1b[2K');
-      this.transientStatusVisible = false;
-    }
     console.log(message);
   }
 
-  private writePlayerLine(line: string): void {
-    if (this.transientStatusVisible && output.isTTY) {
-      output.write('\r\x1b[2K');
-      this.transientStatusVisible = false;
+  private updateLichessDumpProgress(loadedGames: number, totalGames: number, done: boolean): void {
+    const normalizedTotal = Math.max(1, totalGames, loadedGames);
+    const normalizedLoaded = Math.min(loadedGames, normalizedTotal);
+
+    if (!this.lichessDumpProgress) {
+      this.lichessDumpProgress = new cliProgress.SingleBar(
+        {
+          format: 'Status: Lichess user dump [{bar}] {value}/{total}',
+          hideCursor: true,
+          clearOnComplete: true,
+          stopOnComplete: false,
+        },
+        cliProgress.Presets.shades_classic,
+      );
+      this.lichessDumpProgressTotal = normalizedTotal;
+      this.lichessDumpProgress.start(normalizedTotal, normalizedLoaded);
+    } else {
+      if (normalizedTotal !== this.lichessDumpProgressTotal) {
+        this.lichessDumpProgressTotal = normalizedTotal;
+        this.lichessDumpProgress.setTotal(normalizedTotal);
+      }
+      this.lichessDumpProgress.update(normalizedLoaded);
     }
-    process.stdout.write(line);
-    this.playerStreamFile.write(line);
+
+    if (done && this.lichessDumpProgress) {
+      this.lichessDumpProgress.update(normalizedLoaded);
+      this.lichessDumpProgress.stop();
+      this.lichessDumpProgress = null;
+      this.lichessDumpProgressTotal = 0;
+    }
   }
 }
 

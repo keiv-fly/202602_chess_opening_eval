@@ -5,6 +5,8 @@ Interactive TypeScript CLI that evaluates a chess position by combining:
 - Chess.com user move stats
 - Lichess opening database stats and evaluation
 
+For Lichess user data, the CLI now downloads all games for the configured user into `data_in/lichess_<user>.ndjson` and computes per-position move stats from that local dump.
+
 The app prints the board, fetches stats, and displays a merged move table. You can then enter SAN moves to continue exploring the position move by move.
 
 ## Prerequisites
