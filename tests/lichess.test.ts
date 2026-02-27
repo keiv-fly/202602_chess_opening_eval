@@ -20,5 +20,23 @@ describe('LichessClient', () => {
 
     expect(user[0].total).toBe(6);
     expect(db[0].eval?.cp).toBe(34);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    const firstCallUrl = fetchImpl.mock.calls[0][0] as URL;
+    const firstCallOptions = fetchImpl.mock.calls[0][1] as { headers: Record<string, string> };
+    expect(firstCallUrl.toString()).toContain('/player?player=x&fen=fen&color=white&recentGames=0');
+    expect(firstCallOptions.headers).toMatchObject({
+      Accept: 'application/json',
+      'Accept-Encoding': 'gzip, br',
+    });
+  });
+
+  it('includes response text when JSON parsing fails', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(new Response('not-json', { status: 200 }));
+    const client = new LichessClient(fetchImpl as unknown as typeof fetch, 'https://explorer.lichess.ovh');
+
+    await expect(client.getUserMoveStats('x', 'fen', 'white')).rejects.toThrow(
+      'Received body:\nnot-json',
+    );
   });
 });

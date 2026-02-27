@@ -91,7 +91,11 @@ export function moveStatsFromPgnGames(
 }
 
 export class ChessComClient {
-  constructor(private readonly fetchImpl: typeof fetch = fetch, private readonly baseUrl = 'https://api.chess.com/pub') {}
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly baseUrl = 'https://api.chess.com/pub',
+    private readonly onNetworkStatus: (message: string) => void = () => {},
+  ) {}
 
   async getUserMoveStats(username: string, fen: string, side: Side): Promise<MoveStats[]> {
     const archivesUrl = new URL(`/player/${username}/games/archives`, this.baseUrl);
@@ -107,10 +111,39 @@ export class ChessComClient {
   }
 
   private async request<T>(url: URL): Promise<T> {
-    const response = await this.fetchImpl(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      throw new Error(`Chess.com API error ${response.status}: ${response.statusText}`);
+    const startedAt = Date.now();
+    const fullUrl = url.toString();
+    this.onNetworkStatus(`Network: GET ${fullUrl} started`);
+
+    try {
+      const response = await this.fetchImpl(url, { headers: { Accept: 'application/json' } });
+      const elapsedMs = Date.now() - startedAt;
+      this.onNetworkStatus(
+        `Network: GET ${fullUrl} -> ${response.status} ${response.statusText} (${elapsedMs}ms)`,
+      );
+
+      if (!response.ok) {
+        throw new Error(`Chess.com API error ${response.status}: ${response.statusText}`);
+      }
+
+      const responseText = await response.text();
+      return this.parseJsonResponse<T>(responseText, fullUrl);
+    } catch (error: unknown) {
+      const elapsedMs = Date.now() - startedAt;
+      const message = error instanceof Error ? error.message : String(error);
+      this.onNetworkStatus(`Network: GET ${fullUrl} failed after ${elapsedMs}ms (${message})`);
+      throw error;
     }
-    return (await response.json()) as T;
+  }
+
+  private parseJsonResponse<T>(responseText: string, fullUrl: string): T {
+    try {
+      return JSON.parse(responseText) as T;
+    } catch (error: unknown) {
+      const parseMessage = error instanceof Error ? error.message : String(error);
+      const body = responseText.trim() === '' ? '[empty response body]' : responseText;
+      this.onNetworkStatus(`Network: GET ${fullUrl} parse failed; received body:\n${body}`);
+      throw new Error(`Failed to parse JSON from ${fullUrl}: ${parseMessage}\nReceived body:\n${body}`);
+    }
   }
 }

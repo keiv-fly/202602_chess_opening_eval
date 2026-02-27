@@ -1,5 +1,7 @@
 import { Chess } from 'chess.js';
 import * as dotenv from 'dotenv';
+import { createWriteStream } from 'node:fs';
+import { resolve } from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { renderBoard } from './board.js';
@@ -13,8 +15,17 @@ dotenv.config();
 
 class App {
   private readonly cache = new SessionCache();
-  private readonly lichessClient = new LichessClient();
-  private readonly chessComClient = new ChessComClient();
+  private readonly playerStreamFile = createWriteStream(resolve(process.cwd(), 'player.ndjson'), {
+    flags: 'a',
+    encoding: 'utf8',
+  });
+  private readonly lichessClient = new LichessClient(
+    fetch,
+    undefined,
+    (message) => console.log(`Status: ${message}`),
+    (line) => this.writePlayerLine(line),
+  );
+  private readonly chessComClient = new ChessComClient(fetch, undefined, (message) => console.log(`Status: ${message}`));
   private readonly history: string[] = [];
 
   async run(): Promise<void> {
@@ -86,6 +97,11 @@ class App {
 
     const rows = mergeStats(lichessUserStats, chessComStats, lichessDbStats);
     console.log('\n' + renderStatsTable(rows));
+  }
+
+  private writePlayerLine(line: string): void {
+    process.stdout.write(line);
+    this.playerStreamFile.write(line);
   }
 }
 
