@@ -33,6 +33,7 @@ class App {
     undefined,
     undefined,
     (loadedGames, totalGames, done) => this.updateLichessDumpProgress(loadedGames, totalGames, done),
+    (request) => this.promptCloudEvalRetryDecision(request),
   );
   private readonly chessComClient = new ChessComClient(
     fetch,
@@ -281,6 +282,36 @@ class App {
 
   private logLine(message: string): void {
     console.log(message);
+  }
+
+  private async promptCloudEvalRetryDecision(request: {
+    requestDescription: string;
+    retryIndex: number;
+    maxRetries: number;
+    waitSeconds: number;
+  }): Promise<'continue-retries' | 'use-cached-values'> {
+    this.logLine(
+      `Status: Cloud eval retry needed (${request.retryIndex}/${request.maxRetries}, wait ~${request.waitSeconds}s): ${request.requestDescription}`,
+    );
+    const rl = readline.createInterface({ input, output });
+    try {
+      for (;;) {
+        const answer = (
+          await rl.question('Continue retries? [Y]es to keep retrying, [N]o to continue with cached values: ')
+        )
+          .trim()
+          .toLowerCase();
+        if (answer === '' || answer === 'y' || answer === 'yes') {
+          return 'continue-retries';
+        }
+        if (answer === 'n' || answer === 'no') {
+          return 'use-cached-values';
+        }
+        this.logLine('Please answer y/yes or n/no.');
+      }
+    } finally {
+      rl.close();
+    }
   }
 
   private updateLichessDumpProgress(loadedGames: number, totalGames: number, done: boolean): void {

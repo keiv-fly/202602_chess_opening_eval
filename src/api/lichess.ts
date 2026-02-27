@@ -5,7 +5,7 @@ import { basename, resolve } from 'node:path';
 import readline from 'node:readline';
 import { normalizeFenWithoutMoveCounters } from '../fen.js';
 import type { MoveEval, MoveStats, Side } from '../types.js';
-import { fetchWith429Retries } from './retry.js';
+import { fetchWith429Retries, type Retry429Attempt, type Retry429Decision } from './retry.js';
 
 type LichessMove = {
   san: string;
@@ -64,6 +64,21 @@ type LichessUserProfile = {
 type RequestOptions = {
   logNetwork?: boolean;
   onResponseOk?: () => void;
+  onBefore429Retry?: (attempt: Retry429Attempt) => Promise<Retry429Decision> | Retry429Decision;
+};
+
+type CloudEvalRetryChoice = 'continue-retries' | 'use-cached-values';
+
+type CloudEvalRetryPromptContext = {
+  enabled: boolean;
+  choice: CloudEvalRetryChoice | null;
+};
+
+type CloudEvalRetryPromptRequest = {
+  requestDescription: string;
+  retryIndex: number;
+  maxRetries: number;
+  waitSeconds: number;
 };
 
 type UserDumpStepTotals = {
@@ -300,6 +315,9 @@ export class LichessClient {
     private readonly dataInDirectory = resolve(process.cwd(), 'data_in'),
     private readonly onUserDumpProgress: (loadedGames: number, totalGames: number, done: boolean) => void = () =>
       {},
+    private readonly onCloudEvalFirstRetryWhenCacheReady: (
+      request: CloudEvalRetryPromptRequest,
+    ) => Promise<CloudEvalRetryChoice> | CloudEvalRetryChoice = () => 'continue-retries',
   ) {}
 
   async getUserMoveStats(user: string, fen: string, side: Side, sinceTimestampMs: number | null = null): Promise<MoveStats[]> {
@@ -311,10 +329,17 @@ export class LichessClient {
   async getDatabaseMoveStats(fen: string): Promise<Array<MoveStats & { eval?: MoveEval }>> {
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
     const cachePath = this.databaseCachePathForFen(normalizedFen);
+    const cloudEvalRetryPromptContext: CloudEvalRetryPromptContext = { enabled: false, choice: null };
     const cached = await this.readDatabaseCache(cachePath);
     if (cached) {
-      const cloudEvalsBySan = await this.getCloudEvalsForAllMoves(normalizedFen, cached.moves, cached.cloudEvalsBySan);
-      await this.ensureExactCloudEvalFiles(normalizedFen, cached.moves);
+      const cloudEvalsBySan = await this.getCloudEvalsForAllMoves(
+        normalizedFen,
+        cached.moves,
+        cached.cloudEvalsBySan,
+        cloudEvalRetryPromptContext,
+      );
+      cloudEvalRetryPromptContext.enabled = true;
+      await this.ensureExactCloudEvalFiles(normalizedFen, cached.moves, cloudEvalsBySan, cloudEvalRetryPromptContext);
       for (const [san, evalValue] of (await this.readCloudEvalsBySanFromFiles(normalizedFen, cached.moves)).entries()) {
         cloudEvalsBySan.set(san, evalValue);
       }
@@ -336,8 +361,14 @@ export class LichessClient {
 
     const data = await this.requestJson<{ moves?: LichessDbMove[] }>(url);
     const moves = data.moves ?? [];
-    const cloudEvalsBySan = await this.getCloudEvalsForAllMoves(normalizedFen, moves);
-    await this.ensureExactCloudEvalFiles(normalizedFen, moves);
+    const cloudEvalsBySan = await this.getCloudEvalsForAllMoves(
+      normalizedFen,
+      moves,
+      undefined,
+      cloudEvalRetryPromptContext,
+    );
+    cloudEvalRetryPromptContext.enabled = true;
+    await this.ensureExactCloudEvalFiles(normalizedFen, moves, cloudEvalsBySan, cloudEvalRetryPromptContext);
     await this.writeDatabaseCache(cachePath, {
       fen: normalizedFen,
       cachedAt: Date.now(),
@@ -477,14 +508,29 @@ export class LichessClient {
     await writeFile(path, rawResponseText, 'utf8');
   }
 
-  private async ensureExactCloudEvalFiles(baseFen: string, moves: LichessDbMove[]): Promise<void> {
+  private async ensureExactCloudEvalFiles(
+    baseFen: string,
+    moves: LichessDbMove[],
+    cloudEvalsBySan: Map<string, MoveEval>,
+    retryPromptContext: CloudEvalRetryPromptContext,
+  ): Promise<void> {
+    if (retryPromptContext.enabled && retryPromptContext.choice === 'use-cached-values') {
+      return;
+    }
+
     for (const move of moves) {
       const san = move.san;
+      if (!cloudEvalsBySan.has(san)) {
+        continue;
+      }
       const path = this.evalResponsePathForFenMove(baseFen, san);
       if (await this.isRealCloudEvalApiFile(path)) {
         continue;
       }
-      await this.getCloudEvalForMove(baseFen, san);
+      await this.getCloudEvalForMove(baseFen, san, retryPromptContext);
+      if (retryPromptContext.enabled && retryPromptContext.choice === 'use-cached-values') {
+        return;
+      }
     }
   }
 
@@ -557,19 +603,18 @@ export class LichessClient {
     fen: string,
     moves: LichessDbMove[],
     existing: Map<string, MoveEval> | undefined = undefined,
+    retryPromptContext: CloudEvalRetryPromptContext | undefined = undefined,
   ): Promise<Map<string, MoveEval>> {
     const merged = new Map<string, MoveEval>(existing);
-    if (merged.size === 0) {
-      for (const [san, evalValue] of (await this.getCloudEvalsBySan(fen)).entries()) {
-        merged.set(san, evalValue);
-      }
+    for (const [san, evalValue] of (await this.readCloudEvalsBySanFromFiles(fen, moves)).entries()) {
+      merged.set(san, evalValue);
     }
 
     for (const move of moves) {
       if (merged.has(move.san)) {
         continue;
       }
-      const evalAfterMove = await this.getCloudEvalForMove(fen, move.san);
+      const evalAfterMove = await this.getCloudEvalForMove(fen, move.san, retryPromptContext);
       if (evalAfterMove) {
         merged.set(move.san, evalAfterMove);
       }
@@ -578,7 +623,11 @@ export class LichessClient {
     return merged;
   }
 
-  private async getCloudEvalForMove(fen: string, san: string): Promise<MoveEval | undefined> {
+  private async getCloudEvalForMove(
+    fen: string,
+    san: string,
+    retryPromptContext: CloudEvalRetryPromptContext | undefined = undefined,
+  ): Promise<MoveEval | undefined> {
     const chess = new Chess();
     chess.load(fen);
     const moveResult = chess.move(san, { strict: false });
@@ -587,7 +636,7 @@ export class LichessClient {
     }
 
     const childFen = normalizeFenWithoutMoveCounters(chess.fen());
-    const childResult = await this.getCloudEvalResponse(childFen);
+    const childResult = await this.getCloudEvalResponse(childFen, retryPromptContext);
     if (childResult) {
       await this.writeCloudEvalResponseForMove(fen, san, childResult.rawResponseText);
     }
@@ -630,57 +679,66 @@ export class LichessClient {
     }
   }
 
-  private async getCloudEvalResponse(fen: string): Promise<LichessCloudEvalResponseResult | null> {
+  private async handleCloudEval429Retry(
+    attempt: Retry429Attempt,
+    retryPromptContext: CloudEvalRetryPromptContext | undefined,
+  ): Promise<Retry429Decision> {
+    if (!retryPromptContext?.enabled) {
+      return 'retry';
+    }
+    if (retryPromptContext.choice === 'continue-retries') {
+      return 'retry';
+    }
+    if (retryPromptContext.choice === 'use-cached-values') {
+      return 'stop';
+    }
+
+    const choice = await this.onCloudEvalFirstRetryWhenCacheReady({
+      requestDescription: attempt.requestDescription,
+      retryIndex: attempt.retryIndex,
+      maxRetries: attempt.maxRetries,
+      waitSeconds: Math.ceil(attempt.waitMs / 1000),
+    });
+    retryPromptContext.choice = choice;
+    if (choice === 'use-cached-values') {
+      this.onNetworkStatus(`Cloud eval: using cached values; skipped remaining retries for ${attempt.requestDescription}`);
+      return 'stop';
+    }
+    return 'retry';
+  }
+
+  private async getCloudEvalResponse(
+    fen: string,
+    retryPromptContext: CloudEvalRetryPromptContext | undefined = undefined,
+  ): Promise<LichessCloudEvalResponseResult | null> {
+    if (retryPromptContext?.enabled && retryPromptContext.choice === 'use-cached-values') {
+      return null;
+    }
+
     return this.runCloudEvalRequestSequentially(async () => {
       const url = new URL('/api/cloud-eval', this.gamesBaseUrl);
       url.searchParams.set('fen', fen);
 
       try {
-        return await this.requestJsonWithRaw<LichessCloudEvalResponse>(url, { logNetwork: false });
+        return await this.requestJsonWithRaw<LichessCloudEvalResponse>(url, {
+          logNetwork: false,
+          onBefore429Retry: (attempt) => this.handleCloudEval429Retry(attempt, retryPromptContext),
+        });
       } catch (error: unknown) {
         if (error instanceof Error && error.message.includes('Lichess API error 404')) {
+          return null;
+        }
+        if (
+          retryPromptContext?.enabled &&
+          retryPromptContext.choice === 'use-cached-values' &&
+          error instanceof Error &&
+          error.message.includes('Lichess API error 429')
+        ) {
           return null;
         }
         throw error;
       }
     });
-  }
-
-  private async getCloudEvalsBySan(fen: string): Promise<Map<string, MoveEval>> {
-    const response = await this.getCloudEvalResponse(fen);
-    if (!response) {
-      return new Map<string, MoveEval>();
-    }
-    const data = response.data;
-
-    const depth = typeof data.depth === 'number' && Number.isFinite(data.depth) ? data.depth : undefined;
-    const evalsBySan = new Map<string, MoveEval>();
-    for (const pv of data.pvs ?? []) {
-      if (!pv || typeof pv.moves !== 'string') {
-        continue;
-      }
-
-      const cp = typeof pv.cp === 'number' && Number.isFinite(pv.cp) ? pv.cp : undefined;
-      const mate = typeof pv.mate === 'number' && Number.isFinite(pv.mate) ? pv.mate : undefined;
-      if (cp === undefined && mate === undefined) {
-        continue;
-      }
-
-      const firstMove = pv.moves.trim().split(/\s+/)[0];
-      if (!firstMove) {
-        continue;
-      }
-      const chess = new Chess();
-      chess.load(fen);
-      const san = applyMove(chess, firstMove);
-      if (!san || evalsBySan.has(san)) {
-        continue;
-      }
-
-      await this.writeCloudEvalResponseForMove(fen, san, response.rawResponseText);
-      evalsBySan.set(san, { cp, mate, depth });
-    }
-    return evalsBySan;
   }
 
   private async syncUserGames(user: string, cachePaths: UserCachePaths): Promise<void> {
@@ -1038,6 +1096,7 @@ export class LichessClient {
         {
           requestDescription: `GET ${fullUrl}`,
           onWarning: (message) => this.onNetworkStatus(message),
+          onBeforeRetry: options.onBefore429Retry,
         },
       );
 
@@ -1096,6 +1155,7 @@ export class LichessClient {
         {
           requestDescription: `GET ${fullUrl}`,
           onWarning: (message) => this.onNetworkStatus(message),
+          onBeforeRetry: options.onBefore429Retry,
         },
       );
       const requestPageMs = Date.now() - requestPageStartedAt;

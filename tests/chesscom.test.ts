@@ -233,7 +233,7 @@ describe('ChessComClient', () => {
     ).toBe(true);
   });
 
-  it('retries 429 responses up to two times within the retry window and logs warnings', async () => {
+  it('retries 429 responses within the retry window and logs warnings', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-retry-429-'));
     tempDirs.push(dataDir);
     const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
@@ -262,7 +262,7 @@ describe('ChessComClient', () => {
     const stats = await client.getUserMoveStats('keiv84', initialFen, 'white');
     expect(stats).toEqual([]);
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(statusMessages.some((message) => message.includes('Warning: GET https://api.chess.com/pub/player/keiv84/games/archives returned 429 Too Many Requests; retry 1/2'))).toBe(true);
-    expect(statusMessages.some((message) => message.includes('Warning: GET https://api.chess.com/pub/player/keiv84/games/archives returned 429 Too Many Requests; retry 2/2'))).toBe(true);
+    expect(statusMessages.some((message) => message.includes('Warning: GET https://api.chess.com/pub/player/keiv84/games/archives returned 429 Too Many Requests; retry 1/10'))).toBe(true);
+    expect(statusMessages.some((message) => message.includes('Warning: GET https://api.chess.com/pub/player/keiv84/games/archives returned 429 Too Many Requests; retry 2/10'))).toBe(true);
   });
 });

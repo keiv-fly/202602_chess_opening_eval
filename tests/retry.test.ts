@@ -26,7 +26,7 @@ describe('fetchWith429Retries', () => {
     expect(runRequest).toHaveBeenCalledTimes(2);
     expect(onWarning).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Warning: GET https://example.test/resource returned 429 Too Many Requests; retry 1/2 in 60s',
+        'Warning: GET https://example.test/resource returned 429 Too Many Requests; retry 1/10 in 60s',
       ),
     );
   });

@@ -291,14 +291,14 @@ describe('LichessClient', () => {
       statusMessages.some(
         (message) =>
           message.includes('Warning: GET https://lichess.org/api/user/me') &&
-          message.includes('returned 429 Too Many Requests; retry 1/2'),
+          message.includes('returned 429 Too Many Requests; retry 1/10'),
       ),
     ).toBe(true);
     expect(
       statusMessages.some(
         (message) =>
           message.includes('Warning: GET https://lichess.org/api/games/user/me') &&
-          message.includes('returned 429 Too Many Requests; retry 1/2'),
+          message.includes('returned 429 Too Many Requests; retry 1/10'),
       ),
     ).toBe(true);
   });
@@ -342,7 +342,9 @@ describe('LichessClient', () => {
 
     const evalRequestUrl = fetchImpl.mock.calls[1][0] as URL;
     expect(evalRequestUrl.pathname).toBe('/api/cloud-eval');
-    expect(evalRequestUrl.searchParams.get('fen')).toBe(normalizedFen);
+    expect(evalRequestUrl.searchParams.get('fen')).toBe(
+      'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1',
+    );
 
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
     const cacheText = await readFile(cachePath, 'utf8');
@@ -459,6 +461,87 @@ describe('LichessClient', () => {
     expect(childEvalText).toContain('"depth":20');
     expect(childEvalText).toContain('"moves":"d7d5"');
     expect(childEvalText).not.toContain('"source"');
+  });
+
+  it('fetches only uncached cloud eval positions first', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-prefers-uncached-'));
+    tempDirs.push(dataDir);
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ depth: 20, pvs: [{ moves: 'd7d5', cp: 12 }] }), {
+        status: 200,
+      }),
+    );
+    const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+    const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
+    const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
+    await mkdir(join(dataDir, 'lichess_database', 'fen'), { recursive: true });
+    await writeFile(
+      cachePath,
+      `${JSON.stringify({
+        fen: normalizedFen,
+        cachedAt: Date.now(),
+        moves: [
+          { san: 'e4', white: 30, draws: 10, black: 20 },
+          { san: 'd4', white: 25, draws: 10, black: 15 },
+        ],
+      })}\n`,
+      'utf8',
+    );
+
+    const evalDir = join(dataDir, 'lichess_eval', 'fen', encodeURIComponent(normalizedFen));
+    await mkdir(evalDir, { recursive: true });
+    await writeFile(
+      join(evalDir, encodeURIComponent('e4')),
+      JSON.stringify({ depth: 25, pvs: [{ moves: 'e2e4 e7e5', cp: 30 }] }),
+      'utf8',
+    );
+
+    const db = await client.getDatabaseMoveStats(INITIAL_FEN);
+    expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
+    expect(db.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const childEvalRequestUrl = fetchImpl.mock.calls[0][0] as URL;
+    expect(childEvalRequestUrl.pathname).toBe('/api/cloud-eval');
+    expect(childEvalRequestUrl.searchParams.get('fen')).toBe(
+      'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1',
+    );
+  });
+
+  it('can stop cloud eval retries and continue with cached values after first 429', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-cloud-eval-stop-retries-'));
+    tempDirs.push(dataDir);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 429, statusText: 'Too Many Requests', headers: { 'Retry-After': '0' } }));
+    const onCloudEvalFirstRetryWhenCacheReady = vi.fn().mockResolvedValue('use-cached-values');
+    const client = new LichessClient(
+      fetchImpl as unknown as typeof fetch,
+      undefined,
+      () => {},
+      () => {},
+      undefined,
+      dataDir,
+      () => {},
+      onCloudEvalFirstRetryWhenCacheReady,
+    );
+    const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
+    const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
+    await mkdir(join(dataDir, 'lichess_database', 'fen'), { recursive: true });
+    await writeFile(
+      cachePath,
+      `${JSON.stringify({
+        fen: normalizedFen,
+        cachedAt: Date.now(),
+        moves: [{ san: 'e4', white: 30, draws: 10, black: 20 }],
+        cloudEvalsBySan: { e4: { cp: 30, depth: 25 } },
+      })}\n`,
+      'utf8',
+    );
+
+    const db = await client.getDatabaseMoveStats(INITIAL_FEN);
+    expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(onCloudEvalFirstRetryWhenCacheReady).toHaveBeenCalledTimes(1);
   });
 
   it('includes failing NDJSON line when user dump parsing fails', async () => {

@@ -6,8 +6,19 @@ const DEFAULT_RETRY_WINDOW_MS = 60_000;
 type Retry429Options = {
   requestDescription: string;
   onWarning: (message: string) => void;
+  onBeforeRetry?: (attempt: Retry429Attempt) => Promise<Retry429Decision> | Retry429Decision;
   maxRetries?: number;
   retryWindowMs?: number;
+};
+
+export type Retry429Decision = 'retry' | 'stop';
+
+export type Retry429Attempt = {
+  requestDescription: string;
+  response: Response;
+  retryIndex: number;
+  maxRetries: number;
+  waitMs: number;
 };
 
 function parseRetryAfterMs(response: Response): number | null {
@@ -72,6 +83,18 @@ export async function fetchWith429Retries(
     const retryAfterMs = parseRetryAfterMs(response);
     const waitMs = retryAfterMs ?? fallbackDelayMs;
     const retryIndex = retryCount + 1;
+    const attempt: Retry429Attempt = {
+      requestDescription: options.requestDescription,
+      response,
+      retryIndex,
+      maxRetries,
+      waitMs,
+    };
+
+    const retryDecision = (await options.onBeforeRetry?.(attempt)) ?? 'retry';
+    if (retryDecision === 'stop') {
+      return response;
+    }
 
     options.onWarning(
       `Warning: ${options.requestDescription} returned 429 Too Many Requests; retry ${retryIndex}/${maxRetries} in ${Math.ceil(waitMs / 1000)}s`,
