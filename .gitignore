@@ -3,4 +3,6 @@ dist/
 .env
 data_in/
 data_out/
+__pycache__/
+*.zst
 player.ndjson
