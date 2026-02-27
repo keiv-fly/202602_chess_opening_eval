@@ -288,6 +288,7 @@ export function moveStatsFromLichessGames(
 }
 
 export class LichessClient {
+  private static cloudEvalRequestQueue: Promise<void> = Promise.resolve();
   private readonly downloadedUsers = new Set<string>();
 
   constructor(
@@ -614,18 +615,35 @@ export class LichessClient {
     return undefined;
   }
 
-  private async getCloudEvalResponse(fen: string): Promise<LichessCloudEvalResponseResult | null> {
-    const url = new URL('/api/cloud-eval', this.gamesBaseUrl);
-    url.searchParams.set('fen', fen);
+  private async runCloudEvalRequestSequentially<T>(operation: () => Promise<T>): Promise<T> {
+    const previousOperation = LichessClient.cloudEvalRequestQueue;
+    let releaseQueue: (() => void) | undefined;
+    LichessClient.cloudEvalRequestQueue = new Promise<void>((resolve) => {
+      releaseQueue = resolve;
+    });
 
+    await previousOperation;
     try {
-      return await this.requestJsonWithRaw<LichessCloudEvalResponse>(url, { logNetwork: false });
-    } catch (error: unknown) {
-      if (error instanceof Error && error.message.includes('Lichess API error 404')) {
-        return null;
-      }
-      throw error;
+      return await operation();
+    } finally {
+      releaseQueue?.();
     }
+  }
+
+  private async getCloudEvalResponse(fen: string): Promise<LichessCloudEvalResponseResult | null> {
+    return this.runCloudEvalRequestSequentially(async () => {
+      const url = new URL('/api/cloud-eval', this.gamesBaseUrl);
+      url.searchParams.set('fen', fen);
+
+      try {
+        return await this.requestJsonWithRaw<LichessCloudEvalResponse>(url, { logNetwork: false });
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message.includes('Lichess API error 404')) {
+          return null;
+        }
+        throw error;
+      }
+    });
   }
 
   private async getCloudEvalsBySan(fen: string): Promise<Map<string, MoveEval>> {
