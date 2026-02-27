@@ -32,4 +32,20 @@ describe('evaluator', () => {
     expect(table).toContain('10 60.0/20.0/20.0');
     expect(table).toContain('100 50.0/20.0/30.0');
   });
+
+  it('renders 100 percent without decimals and keeps alignment width', () => {
+    const table = renderStatsTable([
+      {
+        san: 'e4',
+        eval: { cp: 34 },
+        lichessUser: { san: 'e4', total: 10, white: 10, draws: 0, black: 0 },
+        chessComUser: { san: 'e4', total: 10, white: 0, draws: 10, black: 0 },
+        lichessDb: { san: 'e4', total: 10, white: 0, draws: 0, black: 10 },
+      },
+    ]);
+
+    expect(table).toContain('10  100/ 0.0/ 0.0');
+    expect(table).toContain('10  0.0/ 100/ 0.0');
+    expect(table).toContain('10  0.0/ 0.0/ 100');
+  });
 });

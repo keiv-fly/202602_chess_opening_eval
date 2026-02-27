@@ -47,9 +47,13 @@ function evalToString(evalValue?: MoveEval): string {
 
 function statsToString(stats: MoveStats | undefined, width: number): string {
   if (!stats || stats.total === 0) return `${''.padStart(width, ' ')} --.-/--.-/--.-`;
-  const ww = ((stats.white / stats.total) * 100).toFixed(1).padStart(4, ' ');
-  const dd = ((stats.draws / stats.total) * 100).toFixed(1).padStart(4, ' ');
-  const bb = ((stats.black / stats.total) * 100).toFixed(1).padStart(4, ' ');
+  const percentToString = (value: number): string => {
+    const formatted = value.toFixed(1);
+    return (formatted === '100.0' ? '100' : formatted).padStart(4, ' ');
+  };
+  const ww = percentToString((stats.white / stats.total) * 100);
+  const dd = percentToString((stats.draws / stats.total) * 100);
+  const bb = percentToString((stats.black / stats.total) * 100);
   return `${String(stats.total).padStart(width, ' ')} ${ww}/${dd}/${bb}`;
 }
 
