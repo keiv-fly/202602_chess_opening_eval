@@ -11,6 +11,7 @@ export type MoveStats = {
 export type MoveEval = {
   cp?: number;
   mate?: number;
+  depth?: number;
 };
 
 export type SourceStats = {

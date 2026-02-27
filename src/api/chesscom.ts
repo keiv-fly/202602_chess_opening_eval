@@ -3,7 +3,9 @@ import { createReadStream, type Dirent } from 'node:fs';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import readline from 'node:readline';
+import { normalizeFenWithoutMoveCounters } from '../fen.js';
 import type { MoveStats, Side } from '../types.js';
+import { fetchWith429Retries } from './retry.js';
 
 type ArchivesResponse = { archives: string[] };
 type GamesResponse = {
@@ -85,6 +87,7 @@ function addGameMoveStat(
   fen: string,
   side: Side,
 ): void {
+  const normalizedTargetFen = normalizeFenWithoutMoveCounters(fen);
   const targetUser = username.toLowerCase();
   const isWhite = game.white.username.toLowerCase() === targetUser;
   const isBlack = game.black.username.toLowerCase() === targetUser;
@@ -102,7 +105,7 @@ function addGameMoveStat(
   let targetMoveSan: string | null = null;
 
   for (const move of history) {
-    if (replay.fen() === fen) {
+    if (normalizeFenWithoutMoveCounters(replay.fen()) === normalizedTargetFen) {
       targetMoveSan = move.san;
       break;
     }
@@ -160,7 +163,8 @@ export class ChessComClient {
 
   async getUserMoveStats(username: string, fen: string, side: Side): Promise<MoveStats[]> {
     const cachePaths = await this.ensureUserGamesCache(username);
-    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, username, fen, side);
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, username, normalizedFen, side);
   }
 
   private async ensureUserGamesCache(username: string): Promise<UserCachePaths> {
@@ -333,7 +337,13 @@ export class ChessComClient {
     }
 
     try {
-      const response = await this.fetchImpl(url, { headers: { Accept: 'application/json' } });
+      const response = await fetchWith429Retries(
+        () => this.fetchImpl(url, { headers: { Accept: 'application/json' } }),
+        {
+          requestDescription: `GET ${fullUrl}`,
+          onWarning: (message) => this.onNetworkStatus(message),
+        },
+      );
       const elapsedMs = Date.now() - startedAt;
       if (shouldLogNetwork) {
         this.onNetworkStatus(

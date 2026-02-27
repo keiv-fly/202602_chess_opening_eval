@@ -3,7 +3,9 @@ import { createReadStream, createWriteStream, type Dirent, type WriteStream } fr
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import readline from 'node:readline';
+import { normalizeFenWithoutMoveCounters } from '../fen.js';
 import type { MoveEval, MoveStats, Side } from '../types.js';
+import { fetchWith429Retries } from './retry.js';
 
 type LichessMove = {
   san: string;
@@ -17,14 +19,38 @@ type LichessDbMove = LichessMove & {
   mate?: number;
 };
 
+type LichessCloudEvalPv = {
+  moves?: string;
+  cp?: number;
+  mate?: number;
+};
+
+type LichessCloudEvalResponse = {
+  depth?: number;
+  pvs?: LichessCloudEvalPv[];
+};
+
+type LichessCloudEvalResponseResult = {
+  data: LichessCloudEvalResponse;
+  rawResponseText: string;
+};
+
+type LichessDatabaseCachePayload = {
+  fen?: string;
+  cachedAt?: number;
+  moves?: LichessDbMove[];
+  cloudEvalsBySan?: Record<string, MoveEval>;
+};
+
 type LichessUserGame = {
   createdAt?: number;
   moves?: string;
   winner?: 'white' | 'black';
   status?: string;
+  pgn?: string;
   players?: {
-    white?: { user?: { name?: string } };
-    black?: { user?: { name?: string } };
+    white?: { user?: { name?: string; id?: string } };
+    black?: { user?: { name?: string; id?: string } };
   };
 };
 
@@ -61,6 +87,11 @@ const LICHESS_PLAYER_CACHE_ROOT = 'lichess_player';
 const LICHESS_PLAYER_DATA_DIRECTORY = 'data';
 const LICHESS_PLAYER_LAST_AVAILABLE_AT_FILE = 'last_available_at.txt';
 const LICHESS_PLAYER_MONTHLY_GAME_COUNT_FILE = 'monthly_games.csv';
+const LICHESS_DATABASE_CACHE_ROOT = 'lichess_database';
+const LICHESS_DATABASE_FEN_DIRECTORY = 'fen';
+const LICHESS_DATABASE_MOVE_LIMIT = 50;
+const LICHESS_EVAL_CACHE_ROOT = 'lichess_eval';
+const LICHESS_EVAL_FEN_DIRECTORY = 'fen';
 
 function sanitizeUserForFileName(user: string): string {
   return user.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -92,16 +123,62 @@ function gameOutcome(game: LichessUserGame): 'white' | 'black' | 'draw' | null {
   return null;
 }
 
-function applyUciMove(chess: Chess, uci: string): string | null {
-  const trimmed = uci.trim();
-  if (trimmed.length < 4) {
+function parsePgnTagValue(pgn: string | undefined, tag: 'White' | 'Black'): string | null {
+  if (!pgn) {
     return null;
   }
-  const from = trimmed.slice(0, 2);
-  const to = trimmed.slice(2, 4);
-  const promotion = trimmed.length > 4 ? (trimmed[4].toLowerCase() as 'q' | 'r' | 'b' | 'n') : undefined;
-  const move = chess.move({ from, to, promotion });
-  return move?.san ?? null;
+  const match = pgn.match(new RegExp(`\\[${tag}\\s+"([^"]+)"\\]`));
+  return match?.[1]?.trim() || null;
+}
+
+function userNameToCompare(name: string | undefined): string | null {
+  const trimmed = name?.trim();
+  return trimmed ? trimmed.toLowerCase() : null;
+}
+
+function extractPlayerName(game: LichessUserGame, side: Side): string | null {
+  const user = side === 'white' ? game.players?.white?.user : game.players?.black?.user;
+  const direct = userNameToCompare(user?.name ?? user?.id);
+  if (direct) {
+    return direct;
+  }
+
+  return parsePgnTagValue(game.pgn, side === 'white' ? 'White' : 'Black')?.toLowerCase() ?? null;
+}
+
+function applyMove(chess: Chess, moveText: string): string | null {
+  const trimmed = moveText.trim();
+  if (trimmed === '') {
+    return null;
+  }
+
+  const uciMatch = /^([a-h][1-8])([a-h][1-8])([qrbnQRBN])?$/u.exec(trimmed);
+  if (uciMatch) {
+    const from = uciMatch[1];
+    const to = uciMatch[2];
+    const promotion = uciMatch[3]?.toLowerCase() as 'q' | 'r' | 'b' | 'n' | undefined;
+    const move = chess.move({ from, to, promotion });
+    return move?.san ?? null;
+  }
+
+  const sanMove = chess.move(trimmed, { strict: false });
+  return sanMove?.san ?? null;
+}
+
+function mapDatabaseMoves(
+  moves: LichessDbMove[],
+  cloudEvalsBySan: Map<string, MoveEval> | undefined = undefined,
+): Array<MoveStats & { eval?: MoveEval }> {
+  return moves.map((m) => ({
+    san: m.san,
+    white: m.white,
+    draws: m.draws,
+    black: m.black,
+    total: m.white + m.draws + m.black,
+    eval:
+      cloudEvalsBySan?.get(m.san) ??
+      (m.cp !== undefined || m.mate !== undefined ? { cp: m.cp, mate: m.mate } : undefined),
+  }));
 }
 
 function addGameMoveStat(
@@ -111,9 +188,10 @@ function addGameMoveStat(
   fen: string,
   side: Side,
 ): void {
+  const normalizedTargetFen = normalizeFenWithoutMoveCounters(fen);
   const targetUser = username.toLowerCase();
-  const whiteUser = game.players?.white?.user?.name?.toLowerCase();
-  const blackUser = game.players?.black?.user?.name?.toLowerCase();
+  const whiteUser = extractPlayerName(game, 'white');
+  const blackUser = extractPlayerName(game, 'black');
   const userMatchesSide = side === 'white' ? whiteUser === targetUser : blackUser === targetUser;
   if (!userMatchesSide) {
     return;
@@ -130,12 +208,12 @@ function addGameMoveStat(
 
   const replay = new Chess();
   let targetMoveSan: string | null = null;
-  for (const uci of game.moves.trim().split(/\s+/)) {
-    if (replay.fen() === fen) {
-      targetMoveSan = applyUciMove(replay, uci);
+  for (const moveText of game.moves.trim().split(/\s+/)) {
+    if (normalizeFenWithoutMoveCounters(replay.fen()) === normalizedTargetFen) {
+      targetMoveSan = applyMove(replay, moveText);
       break;
     }
-    if (!applyUciMove(replay, uci)) {
+    if (!applyMove(replay, moveText)) {
       return;
     }
   }
@@ -202,22 +280,46 @@ export class LichessClient {
 
   async getUserMoveStats(user: string, fen: string, side: Side): Promise<MoveStats[]> {
     const cachePaths = await this.ensureUserGamesCache(user);
-    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, fen, side);
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, normalizedFen, side);
   }
 
   async getDatabaseMoveStats(fen: string): Promise<Array<MoveStats & { eval?: MoveEval }>> {
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    const cachePath = this.databaseCachePathForFen(normalizedFen);
+    const cached = await this.readDatabaseCache(cachePath);
+    if (cached) {
+      const cloudEvalsBySan = await this.getCloudEvalsForAllMoves(normalizedFen, cached.moves, cached.cloudEvalsBySan);
+      await this.ensureExactCloudEvalFiles(normalizedFen, cached.moves);
+      for (const [san, evalValue] of (await this.readCloudEvalsBySanFromFiles(normalizedFen, cached.moves)).entries()) {
+        cloudEvalsBySan.set(san, evalValue);
+      }
+      if (cloudEvalsBySan.size > 0 && (!cached.cloudEvalsBySan || cloudEvalsBySan.size !== cached.cloudEvalsBySan.size)) {
+        await this.writeDatabaseCache(cachePath, {
+          fen: normalizedFen,
+          cachedAt: Date.now(),
+          moves: cached.moves,
+          cloudEvalsBySan: this.serializeCloudEvalsBySan(cloudEvalsBySan),
+        });
+      }
+      return mapDatabaseMoves(cached.moves, cloudEvalsBySan);
+    }
+
     const url = new URL('/lichess', this.baseUrl);
-    url.searchParams.set('fen', fen);
+    url.searchParams.set('fen', normalizedFen);
+    url.searchParams.set('moves', String(LICHESS_DATABASE_MOVE_LIMIT));
 
     const data = await this.requestJson<{ moves?: LichessDbMove[] }>(url);
-    return (data.moves ?? []).map((m) => ({
-      san: m.san,
-      white: m.white,
-      draws: m.draws,
-      black: m.black,
-      total: m.white + m.draws + m.black,
-      eval: m.cp !== undefined || m.mate !== undefined ? { cp: m.cp, mate: m.mate } : undefined,
-    }));
+    const moves = data.moves ?? [];
+    const cloudEvalsBySan = await this.getCloudEvalsForAllMoves(normalizedFen, moves);
+    await this.ensureExactCloudEvalFiles(normalizedFen, moves);
+    await this.writeDatabaseCache(cachePath, {
+      fen: normalizedFen,
+      cachedAt: Date.now(),
+      moves,
+      cloudEvalsBySan: this.serializeCloudEvalsBySan(cloudEvalsBySan),
+    });
+    return mapDatabaseMoves(moves, cloudEvalsBySan);
   }
 
   private async ensureUserGamesCache(user: string): Promise<UserCachePaths> {
@@ -243,6 +345,300 @@ export class LichessClient {
       lastAvailableAtPath: resolve(playerDirectory, LICHESS_PLAYER_LAST_AVAILABLE_AT_FILE),
       monthlyGameCountCsvPath: resolve(playerDirectory, LICHESS_PLAYER_MONTHLY_GAME_COUNT_FILE),
     };
+  }
+
+  private databaseCachePathForFen(fen: string): string {
+    return resolve(
+      this.dataInDirectory,
+      LICHESS_DATABASE_CACHE_ROOT,
+      LICHESS_DATABASE_FEN_DIRECTORY,
+      encodeURIComponent(fen),
+    );
+  }
+
+  private evalResponsePathForFenMove(baseFen: string, move: string): string {
+    return resolve(
+      this.dataInDirectory,
+      LICHESS_EVAL_CACHE_ROOT,
+      LICHESS_EVAL_FEN_DIRECTORY,
+      encodeURIComponent(baseFen),
+      encodeURIComponent(move),
+    );
+  }
+
+  private async readDatabaseCache(
+    cachePath: string,
+  ): Promise<{ moves: LichessDbMove[]; cloudEvalsBySan?: Map<string, MoveEval> } | null> {
+    let text: string;
+    try {
+      text = await readFile(cachePath, 'utf8');
+    } catch (error: unknown) {
+      if (isMissingFileError(error)) {
+        return null;
+      }
+      throw error;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as LichessDatabaseCachePayload;
+      if (!parsed || typeof parsed !== 'object' || !('moves' in parsed) || !Array.isArray(parsed.moves)) {
+        return null;
+      }
+      return {
+        moves: parsed.moves as LichessDbMove[],
+        cloudEvalsBySan: this.parseCloudEvalsBySan(parsed.cloudEvalsBySan),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeDatabaseCache(
+    cachePath: string,
+    payload: { fen: string; cachedAt: number; moves: LichessDbMove[]; cloudEvalsBySan?: Record<string, MoveEval> },
+  ): Promise<void> {
+    await mkdir(resolve(this.dataInDirectory, LICHESS_DATABASE_CACHE_ROOT, LICHESS_DATABASE_FEN_DIRECTORY), {
+      recursive: true,
+    });
+    await writeFile(cachePath, `${JSON.stringify(payload)}\n`, 'utf8');
+  }
+
+  private parseCloudEvalsBySan(raw: unknown): Map<string, MoveEval> | undefined {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return undefined;
+    }
+
+    const parsed = new Map<string, MoveEval>();
+    for (const [san, evalRaw] of Object.entries(raw as Record<string, unknown>)) {
+      if (!evalRaw || typeof evalRaw !== 'object' || Array.isArray(evalRaw)) {
+        continue;
+      }
+
+      const cpRaw = (evalRaw as { cp?: unknown }).cp;
+      const mateRaw = (evalRaw as { mate?: unknown }).mate;
+      const depthRaw = (evalRaw as { depth?: unknown }).depth;
+      const cp = typeof cpRaw === 'number' && Number.isFinite(cpRaw) ? cpRaw : undefined;
+      const mate = typeof mateRaw === 'number' && Number.isFinite(mateRaw) ? mateRaw : undefined;
+      const depth = typeof depthRaw === 'number' && Number.isFinite(depthRaw) ? depthRaw : undefined;
+      if (cp === undefined && mate === undefined) {
+        continue;
+      }
+      parsed.set(san, { cp, mate, depth });
+    }
+
+    return parsed.size > 0 ? parsed : undefined;
+  }
+
+  private serializeCloudEvalsBySan(cloudEvalsBySan: Map<string, MoveEval>): Record<string, MoveEval> | undefined {
+    if (cloudEvalsBySan.size === 0) {
+      return undefined;
+    }
+    return Object.fromEntries(cloudEvalsBySan.entries());
+  }
+
+  private async writeCloudEvalResponseForMove(
+    baseFen: string,
+    move: string,
+    rawResponseText: string,
+  ): Promise<void> {
+    const fenDirectory = resolve(
+      this.dataInDirectory,
+      LICHESS_EVAL_CACHE_ROOT,
+      LICHESS_EVAL_FEN_DIRECTORY,
+      encodeURIComponent(baseFen),
+    );
+    await mkdir(fenDirectory, { recursive: true });
+    const path = this.evalResponsePathForFenMove(baseFen, move);
+    await writeFile(path, rawResponseText, 'utf8');
+  }
+
+  private async ensureExactCloudEvalFiles(baseFen: string, moves: LichessDbMove[]): Promise<void> {
+    for (const move of moves) {
+      const san = move.san;
+      const path = this.evalResponsePathForFenMove(baseFen, san);
+      if (await this.isRealCloudEvalApiFile(path)) {
+        continue;
+      }
+      await this.getCloudEvalForMove(baseFen, san);
+    }
+  }
+
+  private async readCloudEvalsBySanFromFiles(fen: string, moves: LichessDbMove[]): Promise<Map<string, MoveEval>> {
+    const evalsBySan = new Map<string, MoveEval>();
+    for (const move of moves) {
+      const path = this.evalResponsePathForFenMove(fen, move.san);
+      const evalValue = await this.readPrimaryEvalFromStoredFile(path);
+      if (evalValue) {
+        evalsBySan.set(move.san, evalValue);
+      }
+    }
+    return evalsBySan;
+  }
+
+  private async readPrimaryEvalFromStoredFile(path: string): Promise<MoveEval | undefined> {
+    let text: string;
+    try {
+      text = await readFile(path, 'utf8');
+    } catch (error: unknown) {
+      if (isMissingFileError(error)) {
+        return undefined;
+      }
+      throw error;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'response' in parsed) {
+        const wrappedResponse = (parsed as { response?: unknown }).response;
+        if (wrappedResponse && typeof wrappedResponse === 'object' && !Array.isArray(wrappedResponse)) {
+          return this.getPrimaryCloudEval(wrappedResponse as LichessCloudEvalResponse) ?? undefined;
+        }
+      }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return this.getPrimaryCloudEval(parsed as LichessCloudEvalResponse) ?? undefined;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async isRealCloudEvalApiFile(path: string): Promise<boolean> {
+    let text: string;
+    try {
+      text = await readFile(path, 'utf8');
+    } catch (error: unknown) {
+      if (isMissingFileError(error)) {
+        return false;
+      }
+      throw error;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return false;
+      }
+      if ('response' in parsed || 'baseFen' in parsed || 'requestedFen' in parsed || 'source' in parsed) {
+        return false;
+      }
+      return 'pvs' in parsed || 'depth' in parsed;
+    } catch {
+      return false;
+    }
+  }
+
+  private async getCloudEvalsForAllMoves(
+    fen: string,
+    moves: LichessDbMove[],
+    existing: Map<string, MoveEval> | undefined = undefined,
+  ): Promise<Map<string, MoveEval>> {
+    const merged = new Map<string, MoveEval>(existing);
+    if (merged.size === 0) {
+      for (const [san, evalValue] of (await this.getCloudEvalsBySan(fen)).entries()) {
+        merged.set(san, evalValue);
+      }
+    }
+
+    for (const move of moves) {
+      if (merged.has(move.san)) {
+        continue;
+      }
+      const evalAfterMove = await this.getCloudEvalForMove(fen, move.san);
+      if (evalAfterMove) {
+        merged.set(move.san, evalAfterMove);
+      }
+    }
+
+    return merged;
+  }
+
+  private async getCloudEvalForMove(fen: string, san: string): Promise<MoveEval | undefined> {
+    const chess = new Chess();
+    chess.load(fen);
+    const moveResult = chess.move(san, { strict: false });
+    if (!moveResult) {
+      return undefined;
+    }
+
+    const childFen = normalizeFenWithoutMoveCounters(chess.fen());
+    const childResult = await this.getCloudEvalResponse(childFen);
+    if (childResult) {
+      await this.writeCloudEvalResponseForMove(fen, san, childResult.rawResponseText);
+    }
+    const childData = childResult?.data ?? null;
+    const childEval = this.getPrimaryCloudEval(childData);
+    if (!childEval) {
+      return undefined;
+    }
+    return childEval;
+  }
+
+  private getPrimaryCloudEval(data: LichessCloudEvalResponse | null): MoveEval | undefined {
+    if (!data) {
+      return undefined;
+    }
+
+    const depth = typeof data.depth === 'number' && Number.isFinite(data.depth) ? data.depth : undefined;
+    for (const pv of data.pvs ?? []) {
+      const cp = typeof pv.cp === 'number' && Number.isFinite(pv.cp) ? pv.cp : undefined;
+      const mate = typeof pv.mate === 'number' && Number.isFinite(pv.mate) ? pv.mate : undefined;
+      if (cp !== undefined || mate !== undefined) {
+        return { cp, mate, depth };
+      }
+    }
+    return undefined;
+  }
+
+  private async getCloudEvalResponse(fen: string): Promise<LichessCloudEvalResponseResult | null> {
+    const url = new URL('/api/cloud-eval', this.gamesBaseUrl);
+    url.searchParams.set('fen', fen);
+
+    try {
+      return await this.requestJsonWithRaw<LichessCloudEvalResponse>(url, { logNetwork: false });
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes('Lichess API error 404')) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async getCloudEvalsBySan(fen: string): Promise<Map<string, MoveEval>> {
+    const response = await this.getCloudEvalResponse(fen);
+    if (!response) {
+      return new Map<string, MoveEval>();
+    }
+    const data = response.data;
+
+    const depth = typeof data.depth === 'number' && Number.isFinite(data.depth) ? data.depth : undefined;
+    const evalsBySan = new Map<string, MoveEval>();
+    for (const pv of data.pvs ?? []) {
+      if (!pv || typeof pv.moves !== 'string') {
+        continue;
+      }
+
+      const cp = typeof pv.cp === 'number' && Number.isFinite(pv.cp) ? pv.cp : undefined;
+      const mate = typeof pv.mate === 'number' && Number.isFinite(pv.mate) ? pv.mate : undefined;
+      if (cp === undefined && mate === undefined) {
+        continue;
+      }
+
+      const firstMove = pv.moves.trim().split(/\s+/)[0];
+      if (!firstMove) {
+        continue;
+      }
+      const chess = new Chess();
+      chess.load(fen);
+      const san = applyMove(chess, firstMove);
+      if (!san || evalsBySan.has(san)) {
+        continue;
+      }
+
+      await this.writeCloudEvalResponseForMove(fen, san, response.rawResponseText);
+      evalsBySan.set(san, { cp, mate, depth });
+    }
+    return evalsBySan;
   }
 
   private async syncUserGames(user: string, cachePaths: UserCachePaths): Promise<void> {
@@ -555,6 +951,14 @@ export class LichessClient {
   }
 
   private async requestJson<T>(url: URL, options: RequestOptions = { logNetwork: true }): Promise<T> {
+    const { data } = await this.requestJsonWithRaw<T>(url, options);
+    return data;
+  }
+
+  private async requestJsonWithRaw<T>(
+    url: URL,
+    options: RequestOptions = { logNetwork: true },
+  ): Promise<{ data: T; rawResponseText: string }> {
     const startedAt = Date.now();
     const fullUrl = url.toString();
     const shouldLogNetwork = options.logNetwork ?? true;
@@ -563,12 +967,19 @@ export class LichessClient {
     }
 
     try {
-      const response = await this.fetchImpl(url, {
-        headers: {
-          Accept: 'application/json',
-          'Accept-Encoding': 'gzip, br',
+      const response = await fetchWith429Retries(
+        () =>
+          this.fetchImpl(url, {
+            headers: {
+              Accept: 'application/json',
+              'Accept-Encoding': 'gzip, br',
+            },
+          }),
+        {
+          requestDescription: `GET ${fullUrl}`,
+          onWarning: (message) => this.onNetworkStatus(message),
         },
-      });
+      );
 
       const elapsedMs = Date.now() - startedAt;
       if (shouldLogNetwork) {
@@ -582,7 +993,10 @@ export class LichessClient {
       }
 
       const responseText = await response.text();
-      return this.parseJsonResponse<T>(responseText, fullUrl);
+      return {
+        data: this.parseJsonResponse<T>(responseText, fullUrl),
+        rawResponseText: responseText,
+      };
     } catch (error: unknown) {
       const elapsedMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : String(error);
@@ -611,12 +1025,19 @@ export class LichessClient {
 
     try {
       const requestPageStartedAt = Date.now();
-      const response = await this.fetchImpl(url, {
-        headers: {
-          Accept: 'application/x-ndjson',
-          'Accept-Encoding': 'gzip, br',
+      const response = await fetchWith429Retries(
+        () =>
+          this.fetchImpl(url, {
+            headers: {
+              Accept: 'application/x-ndjson',
+              'Accept-Encoding': 'gzip, br',
+            },
+          }),
+        {
+          requestDescription: `GET ${fullUrl}`,
+          onWarning: (message) => this.onNetworkStatus(message),
         },
-      });
+      );
       const requestPageMs = Date.now() - requestPageStartedAt;
 
       const elapsedMs = Date.now() - startedAt;

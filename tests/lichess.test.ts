@@ -3,8 +3,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LichessClient, moveStatsFromLichessGames } from '../src/api/lichess.js';
+import { normalizeFenWithoutMoveCounters } from '../src/fen.js';
 
 const INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const FEN_AFTER_E4_C5 = 'rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
 
 const SAMPLE_GAMES = [
   {
@@ -48,6 +50,46 @@ describe('LichessClient', () => {
     expect(stats).toHaveLength(2);
     expect(stats[0]).toMatchObject({ san: 'd4', total: 1, draws: 1 });
     expect(stats[1]).toMatchObject({ san: 'e4', total: 1, white: 1 });
+  });
+
+  it('collects move stats from SAN move strings in Lichess game files', () => {
+    const stats = moveStatsFromLichessGames(
+      [
+        {
+          createdAt: Date.UTC(2026, 1, 27),
+          moves: 'e4 c5 Nf3 e6',
+          winner: 'white',
+          players: {
+            white: { user: { name: 'me', id: 'me' } },
+            black: { user: { name: 'op1', id: 'op1' } },
+          },
+        },
+      ],
+      'me',
+      FEN_AFTER_E4_C5,
+      'white',
+    );
+    expect(stats).toEqual([{ san: 'Nf3', white: 1, draws: 0, black: 0, total: 1 }]);
+  });
+
+  it('matches move stats while ignoring FEN move counters', () => {
+    const stats = moveStatsFromLichessGames(
+      [
+        {
+          createdAt: Date.UTC(2026, 1, 27),
+          moves: 'e4 c5 Nf3 e6',
+          winner: 'white',
+          players: {
+            white: { user: { name: 'me', id: 'me' } },
+            black: { user: { name: 'op1', id: 'op1' } },
+          },
+        },
+      ],
+      'me',
+      'rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 37 99',
+      'white',
+    );
+    expect(stats).toEqual([{ san: 'Nf3', white: 1, draws: 0, black: 0, total: 1 }]);
   });
 
   it('downloads user games into monthly cache files and reuses the dump', async () => {
@@ -173,17 +215,200 @@ describe('LichessClient', () => {
     ]);
   });
 
-  it('maps Lichess database move stats and eval fields', async () => {
+  it('retries 429 responses for profile and game dump requests and logs warnings', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-retry-429-'));
+    tempDirs.push(dataDir);
+    const statusMessages: string[] = [];
+    const body = `${JSON.stringify(SAMPLE_GAMES[0])}\n`;
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 429, statusText: 'Too Many Requests', headers: { 'Retry-After': '0' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ count: { all: 999 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response('', { status: 429, statusText: 'Too Many Requests', headers: { 'Retry-After': '0' } }))
+      .mockResolvedValueOnce(new Response(body, { status: 200 }));
+    const client = new LichessClient(
+      fetchImpl as unknown as typeof fetch,
+      undefined,
+      (message) => statusMessages.push(message),
+      () => {},
+      undefined,
+      dataDir,
+    );
+
+    const stats = await client.getUserMoveStats('me', INITIAL_FEN, 'white');
+    expect(stats).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(
+      statusMessages.some(
+        (message) =>
+          message.includes('Warning: GET https://lichess.org/api/user/me') &&
+          message.includes('returned 429 Too Many Requests; retry 1/2'),
+      ),
+    ).toBe(true);
+    expect(
+      statusMessages.some(
+        (message) =>
+          message.includes('Warning: GET https://lichess.org/api/games/user/me') &&
+          message.includes('returned 429 Too Many Requests; retry 1/2'),
+      ),
+    ).toBe(true);
+  });
+
+  it('maps and caches Lichess database move stats by FEN', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-cache-'));
+    tempDirs.push(dataDir);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ moves: [{ san: 'e4', white: 30, draws: 10, black: 20, cp: 34 }] }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ depth: 25, pvs: [{ moves: 'e2e4 e7e5', cp: 30 }] }), {
+          status: 200,
+        }),
+      );
+    const client = new LichessClient(
+      fetchImpl as unknown as typeof fetch,
+      'https://explorer.lichess.ovh',
+      () => {},
+      () => {},
+      undefined,
+      dataDir,
+    );
+
+    const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 23 19';
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    const db = await client.getDatabaseMoveStats(fen);
+    const cachedDb = await client.getDatabaseMoveStats(fen);
+    expect(db[0].eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
+    expect(cachedDb[0].eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    const dbRequestUrl = fetchImpl.mock.calls[0][0] as URL;
+    expect(dbRequestUrl.searchParams.get('moves')).toBe('50');
+    expect(dbRequestUrl.searchParams.get('fen')).toBe(normalizedFen);
+
+    const evalRequestUrl = fetchImpl.mock.calls[1][0] as URL;
+    expect(evalRequestUrl.pathname).toBe('/api/cloud-eval');
+    expect(evalRequestUrl.searchParams.get('fen')).toBe(normalizedFen);
+
+    const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
+    const cacheText = await readFile(cachePath, 'utf8');
+    expect(cacheText).toContain('"san":"e4"');
+    expect(cacheText).toContain('"cloudEvalsBySan"');
+    expect(cacheText).toContain('"depth":25');
+
+    const evalPath = join(dataDir, 'lichess_eval', 'fen', encodeURIComponent(normalizedFen), encodeURIComponent('e4'));
+    const evalText = await readFile(evalPath, 'utf8');
+    expect(evalText).toContain('"depth":25');
+    expect(evalText).toContain('"moves":"e2e4 e7e5"');
+    expect(evalText).not.toContain('"source"');
+  });
+
+  it('backfills lichess_eval files from cached cloud eval map with real API output', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-eval-backfill-'));
+    tempDirs.push(dataDir);
     const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ moves: [{ san: 'e4', white: 30, draws: 10, black: 20, cp: 34 }] }), {
+      new Response(JSON.stringify({ depth: 31, pvs: [{ moves: 'e7e5', cp: -42 }] }), {
         status: 200,
       }),
     );
-    const client = new LichessClient(fetchImpl as unknown as typeof fetch, 'https://explorer.lichess.ovh');
+    const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+    const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
+    const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
+    await mkdir(join(dataDir, 'lichess_database', 'fen'), { recursive: true });
+    await writeFile(
+      cachePath,
+      `${JSON.stringify({
+        fen: normalizedFen,
+        cachedAt: Date.now(),
+        moves: [{ san: 'e4', white: 1, draws: 0, black: 0 }],
+        cloudEvalsBySan: { e4: { cp: 42, depth: 31 } },
+      })}\n`,
+      'utf8',
+    );
 
-    const db = await client.getDatabaseMoveStats('fen');
-    expect(db[0].eval?.cp).toBe(34);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const db = await client.getDatabaseMoveStats(INITIAL_FEN);
+    expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: -42, mate: undefined, depth: 31 });
+
+    const evalPath = join(dataDir, 'lichess_eval', 'fen', encodeURIComponent(normalizedFen), encodeURIComponent('e4'));
+    const evalText = await readFile(evalPath, 'utf8');
+    expect(evalText).toContain('"depth":31');
+    expect(evalText).toContain('"moves":"e7e5"');
+    expect(evalText).toContain('"cp":-42');
+    expect(evalText).not.toContain('"source"');
+  });
+
+  it('keeps root cloud eval signs unchanged from API response', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-white-perspective-'));
+    tempDirs.push(dataDir);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ moves: [{ san: 'e5', white: 30, draws: 10, black: 20 }] }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ depth: 26, pvs: [{ moves: 'e7e5 g1f3', cp: 40 }] }), {
+          status: 200,
+        }),
+      );
+    const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
+    const db = await client.getDatabaseMoveStats(fen);
+    expect(db.find((move) => move.san === 'e5')?.eval).toEqual({ cp: 40, mate: undefined, depth: 26 });
+  });
+
+  it('fills missing move evals using child-position cloud eval', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-cloud-eval-all-moves-'));
+    tempDirs.push(dataDir);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            moves: [
+              { san: 'e4', white: 30, draws: 10, black: 20 },
+              { san: 'd4', white: 25, draws: 10, black: 15 },
+            ],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ depth: 25, pvs: [{ moves: 'e2e4 e7e5', cp: 30 }] }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ depth: 20, pvs: [{ moves: 'd7d5', cp: 12 }] }), {
+          status: 200,
+        }),
+      );
+    const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+
+    const db = await client.getDatabaseMoveStats(INITIAL_FEN);
+    const cachedDb = await client.getDatabaseMoveStats(INITIAL_FEN);
+    expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
+    expect(db.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
+    expect(cachedDb.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+
+    const childEvalRequestUrl = fetchImpl.mock.calls[2][0] as URL;
+    expect(childEvalRequestUrl.pathname).toBe('/api/cloud-eval');
+    expect(childEvalRequestUrl.searchParams.get('fen')).toBe(
+      'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1',
+    );
+
+    const childEvalPath = join(dataDir, 'lichess_eval', 'fen', encodeURIComponent(INITIAL_FEN), encodeURIComponent('d4'));
+    const childEvalText = await readFile(childEvalPath, 'utf8');
+    expect(childEvalText).toContain('"depth":20');
+    expect(childEvalText).toContain('"moves":"d7d5"');
+    expect(childEvalText).not.toContain('"source"');
   });
 
   it('includes failing NDJSON line when user dump parsing fails', async () => {

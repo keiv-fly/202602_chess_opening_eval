@@ -8,6 +8,7 @@ import { SessionCache } from './cache.js';
 import { LichessClient } from './api/lichess.js';
 import { ChessComClient } from './api/chesscom.js';
 import { mergeStats, renderStatsTable } from './evaluator.js';
+import { normalizeFenWithoutMoveCounters } from './fen.js';
 import type { Side } from './types.js';
 
 dotenv.config();
@@ -89,20 +90,25 @@ class App {
   private async evaluatePosition(fen: string, side: Side, lichessUser: string, chessComUser: string): Promise<void> {
     this.logLine('\n' + renderBoard(fen));
     this.logLine(`\nFetching stats for ${side}...`);
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
 
-    const lichessUserKey = `lichess-user:${lichessUser}:${side}:${fen}`;
-    const lichessDbKey = `lichess-db:${fen}`;
-    const chessComKey = `chesscom:${chessComUser}:${side}:${fen}`;
+    const lichessUserKey = `lichess-user:${lichessUser}:${side}:${normalizedFen}`;
+    const lichessDbKey = `lichess-db:${normalizedFen}`;
+    const chessComKey = `chesscom:${chessComUser}:${side}:${normalizedFen}`;
 
     this.logLine('Status: Lichess user request started');
-    const lichessUserStats = await this.cache.getOrSet(lichessUserKey, () => this.lichessClient.getUserMoveStats(lichessUser, fen, side));
+    const lichessUserStats = await this.cache.getOrSet(lichessUserKey, () =>
+      this.lichessClient.getUserMoveStats(lichessUser, normalizedFen, side),
+    );
     this.logLine('Status: Lichess user request finished');
 
     this.logLine('Status: Lichess DB request started');
-    const lichessDbPromise = this.cache.getOrSet(lichessDbKey, () => this.lichessClient.getDatabaseMoveStats(fen));
+    const lichessDbPromise = this.cache.getOrSet(lichessDbKey, () => this.lichessClient.getDatabaseMoveStats(normalizedFen));
 
     this.logLine('Status: Chess.com user request started');
-    const chessComPromise = this.cache.getOrSet(chessComKey, () => this.chessComClient.getUserMoveStats(chessComUser, fen, side));
+    const chessComPromise = this.cache.getOrSet(chessComKey, () =>
+      this.chessComClient.getUserMoveStats(chessComUser, normalizedFen, side),
+    );
 
     const [lichessDbStats, chessComStats] = await Promise.all([lichessDbPromise, chessComPromise]);
     this.logLine('Status: Lichess DB request finished');

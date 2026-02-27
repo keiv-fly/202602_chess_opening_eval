@@ -42,6 +42,15 @@ describe('moveStatsFromPgnGames', () => {
 
     expect(stats[0]).toMatchObject({ san: 'd4', total: 1, draws: 1 });
   });
+
+  it('matches move stats while ignoring FEN move counters', () => {
+    const fenWithDifferentMoveCounters =
+      'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 27 42';
+    const stats = moveStatsFromPgnGames([...GAMES], 'me', fenWithDifferentMoveCounters, 'white');
+
+    expect(stats).toHaveLength(1);
+    expect(stats[0]).toMatchObject({ san: 'e4', total: 2, white: 1, black: 1, draws: 0 });
+  });
 });
 
 describe('ChessComClient', () => {
@@ -151,5 +160,38 @@ describe('ChessComClient', () => {
         message.includes('Network: GET https://api.chess.com/pub/player/keiv84/games/archives -> 200'),
       ),
     ).toBe(true);
+  });
+
+  it('retries 429 responses up to two times within the retry window and logs warnings', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-retry-429-'));
+    tempDirs.push(dataDir);
+    const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const statusMessages: string[] = [];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status: 429, statusText: 'Too Many Requests', headers: { 'Retry-After': '0' } }))
+      .mockResolvedValueOnce(new Response('', { status: 429, statusText: 'Too Many Requests', headers: { 'Retry-After': '0' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            archives: ['https://api.chess.com/pub/player/keiv84/games/2024/01'],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ games: [] }), { status: 200 }));
+
+    const client = new ChessComClient(
+      fetchImpl as unknown as typeof fetch,
+      undefined,
+      (message) => statusMessages.push(message),
+      dataDir,
+    );
+
+    const stats = await client.getUserMoveStats('keiv84', initialFen, 'white');
+    expect(stats).toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(statusMessages.some((message) => message.includes('Warning: GET https://api.chess.com/pub/player/keiv84/games/archives returned 429 Too Many Requests; retry 1/2'))).toBe(true);
+    expect(statusMessages.some((message) => message.includes('Warning: GET https://api.chess.com/pub/player/keiv84/games/archives returned 429 Too Many Requests; retry 2/2'))).toBe(true);
   });
 });
