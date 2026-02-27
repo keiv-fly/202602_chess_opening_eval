@@ -114,31 +114,41 @@ class App {
   }
 
   private updateLichessDumpProgress(loadedGames: number, totalGames: number, done: boolean): void {
-    const normalizedTotal = Math.max(1, totalGames, loadedGames);
-    const normalizedLoaded = Math.min(loadedGames, normalizedTotal);
+    const normalizedTotal = Math.max(0, totalGames);
+    const normalizedLoaded = Math.max(0, Math.min(loadedGames, normalizedTotal));
+    const progressTotal = Math.max(1, normalizedTotal);
+    const progressLoaded = done ? progressTotal : Math.min(normalizedLoaded, progressTotal);
+    const progressPayload = {
+      displayValue: done ? normalizedTotal : normalizedLoaded,
+      displayTotal: normalizedTotal,
+    };
 
     if (!this.lichessDumpProgress) {
       this.lichessDumpProgress = new cliProgress.SingleBar(
         {
-          format: 'Status: Lichess user dump [{bar}] {value}/{total}',
+          format:
+            'Status: Lichess user dump [{bar}] {displayValue}/{displayTotal} ETA {eta_formatted} Elapsed {duration_formatted}',
           hideCursor: true,
-          clearOnComplete: true,
+          clearOnComplete: false,
           stopOnComplete: false,
+          stream: output,
+          autopadding: true,
+          forceRedraw: true,
         },
         cliProgress.Presets.shades_classic,
       );
-      this.lichessDumpProgressTotal = normalizedTotal;
-      this.lichessDumpProgress.start(normalizedTotal, normalizedLoaded);
+      this.lichessDumpProgressTotal = progressTotal;
+      this.lichessDumpProgress.start(progressTotal, progressLoaded, progressPayload);
     } else {
-      if (normalizedTotal !== this.lichessDumpProgressTotal) {
-        this.lichessDumpProgressTotal = normalizedTotal;
-        this.lichessDumpProgress.setTotal(normalizedTotal);
+      if (progressTotal !== this.lichessDumpProgressTotal) {
+        this.lichessDumpProgressTotal = progressTotal;
+        this.lichessDumpProgress.setTotal(progressTotal);
       }
-      this.lichessDumpProgress.update(normalizedLoaded);
+      this.lichessDumpProgress.update(progressLoaded, progressPayload);
     }
 
     if (done && this.lichessDumpProgress) {
-      this.lichessDumpProgress.update(normalizedLoaded);
+      this.lichessDumpProgress.update(progressLoaded, progressPayload);
       this.lichessDumpProgress.stop();
       this.lichessDumpProgress = null;
       this.lichessDumpProgressTotal = 0;
