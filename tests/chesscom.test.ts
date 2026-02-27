@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { moveStatsFromPgnGames } from '../src/api/chesscom.js';
+import { readFile, rm, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ChessComClient, moveStatsFromPgnGames } from '../src/api/chesscom.js';
 
 const GAMES = [
   {
@@ -18,6 +21,11 @@ const GAMES = [
     black: { username: 'me', result: 'agreed' },
   },
 ] as const;
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 describe('moveStatsFromPgnGames', () => {
   it('collects next-move stats for matching FEN and side', () => {
@@ -33,5 +41,115 @@ describe('moveStatsFromPgnGames', () => {
     const stats = moveStatsFromPgnGames([...GAMES], 'me', initialFen, 'black');
 
     expect(stats[0]).toMatchObject({ san: 'd4', total: 1, draws: 1 });
+  });
+});
+
+describe('ChessComClient', () => {
+  it('requests archives from the official /pub endpoint', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-endpoint-'));
+    tempDirs.push(dataDir);
+    const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            archives: ['https://api.chess.com/pub/player/keiv84/games/2024/01'],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ games: [] }), { status: 200 }));
+
+    const client = new ChessComClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, dataDir);
+    const stats = await client.getUserMoveStats('keiv84', initialFen, 'white');
+
+    expect(stats).toEqual([]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+
+    const archivesUrl = fetchImpl.mock.calls[0][0] as URL;
+    expect(archivesUrl.toString()).toBe('https://api.chess.com/pub/player/keiv84/games/archives');
+  });
+
+  it('downloads monthly archives to data_in/chess_com_player and writes monthly_games.csv', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-user-dump-'));
+    tempDirs.push(dataDir);
+    const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const progressEvents: Array<{ loaded: number; total: number; done: boolean }> = [];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            archives: [
+              'https://api.chess.com/pub/player/me/games/2024/01',
+              'https://api.chess.com/pub/player/me/games/2024/02',
+            ],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ games: [GAMES[0]] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ games: [GAMES[1], GAMES[2]] }), { status: 200 }));
+
+    const client = new ChessComClient(
+      fetchImpl as unknown as typeof fetch,
+      undefined,
+      () => {},
+      dataDir,
+      (loaded, total, done) => progressEvents.push({ loaded, total, done }),
+    );
+
+    const first = await client.getUserMoveStats('me', initialFen, 'white');
+    const second = await client.getUserMoveStats('me', initialFen, 'white');
+
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+
+    const userDir = join(dataDir, 'chess_com_player', 'me');
+    const januaryDump = await readFile(join(userDir, 'data', '2024-01.ndjson'), 'utf8');
+    const februaryDump = await readFile(join(userDir, 'data', '2024-02.ndjson'), 'utf8');
+    const monthlyCsv = await readFile(join(userDir, 'monthly_games.csv'), 'utf8');
+
+    expect(januaryDump).toContain('[Site \\"Chess.com\\"]');
+    expect(februaryDump).toContain('[Site \\"Chess.com\\"]');
+    expect(monthlyCsv).toBe('year_month,games\n2024-01,1\n2024-02,2\n');
+
+    expect(progressEvents[0]).toEqual({ loaded: 0, total: 2, done: false });
+    expect(progressEvents[progressEvents.length - 1]).toEqual({ loaded: 2, total: 2, done: true });
+  });
+
+  it('does not emit chess.com network started lines', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-no-started-lines-'));
+    tempDirs.push(dataDir);
+    const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const statusMessages: string[] = [];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            archives: ['https://api.chess.com/pub/player/keiv84/games/2024/01'],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ games: [] }), { status: 200 }));
+
+    const client = new ChessComClient(
+      fetchImpl as unknown as typeof fetch,
+      undefined,
+      (message) => statusMessages.push(message),
+      dataDir,
+    );
+    await client.getUserMoveStats('keiv84', initialFen, 'white');
+
+    expect(statusMessages.some((message) => message.includes(' started'))).toBe(false);
+    expect(
+      statusMessages.some((message) =>
+        message.includes('Network: GET https://api.chess.com/pub/player/keiv84/games/archives -> 200'),
+      ),
+    ).toBe(true);
   });
 });

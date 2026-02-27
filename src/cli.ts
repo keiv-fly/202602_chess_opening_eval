@@ -23,10 +23,18 @@ class App {
     undefined,
     (loadedGames, totalGames, done) => this.updateLichessDumpProgress(loadedGames, totalGames, done),
   );
-  private readonly chessComClient = new ChessComClient(fetch, undefined, (message) => this.logStatus(message));
+  private readonly chessComClient = new ChessComClient(
+    fetch,
+    undefined,
+    (message) => this.logStatus(message),
+    undefined,
+    (loadedFiles, totalFiles, done) => this.updateChessComDumpProgress(loadedFiles, totalFiles, done),
+  );
   private readonly history: string[] = [];
   private lichessDumpProgress: cliProgress.SingleBar | null = null;
   private lichessDumpProgressTotal = 0;
+  private chessComDumpProgress: cliProgress.SingleBar | null = null;
+  private chessComDumpProgressTotal = 0;
 
   async run(): Promise<void> {
     const rl = readline.createInterface({ input, output });
@@ -152,6 +160,48 @@ class App {
       this.lichessDumpProgress.stop();
       this.lichessDumpProgress = null;
       this.lichessDumpProgressTotal = 0;
+    }
+  }
+
+  private updateChessComDumpProgress(loadedFiles: number, totalFiles: number, done: boolean): void {
+    const normalizedTotal = Math.max(0, totalFiles);
+    const normalizedLoaded = Math.max(0, Math.min(loadedFiles, normalizedTotal));
+    const progressTotal = Math.max(1, normalizedTotal);
+    const progressLoaded = done ? progressTotal : Math.min(normalizedLoaded, progressTotal);
+    const progressPayload = {
+      displayValue: done ? normalizedTotal : normalizedLoaded,
+      displayTotal: normalizedTotal,
+    };
+
+    if (!this.chessComDumpProgress) {
+      this.chessComDumpProgress = new cliProgress.SingleBar(
+        {
+          format:
+            'Status: Chess.com user dump [{bar}] {displayValue}/{displayTotal} ETA {eta_formatted} Elapsed {duration_formatted}',
+          hideCursor: true,
+          clearOnComplete: false,
+          stopOnComplete: false,
+          stream: output,
+          autopadding: true,
+          forceRedraw: true,
+        },
+        cliProgress.Presets.shades_classic,
+      );
+      this.chessComDumpProgressTotal = progressTotal;
+      this.chessComDumpProgress.start(progressTotal, progressLoaded, progressPayload);
+    } else {
+      if (progressTotal !== this.chessComDumpProgressTotal) {
+        this.chessComDumpProgressTotal = progressTotal;
+        this.chessComDumpProgress.setTotal(progressTotal);
+      }
+      this.chessComDumpProgress.update(progressLoaded, progressPayload);
+    }
+
+    if (done && this.chessComDumpProgress) {
+      this.chessComDumpProgress.update(progressLoaded, progressPayload);
+      this.chessComDumpProgress.stop();
+      this.chessComDumpProgress = null;
+      this.chessComDumpProgressTotal = 0;
     }
   }
 }
