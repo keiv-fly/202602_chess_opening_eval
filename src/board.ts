@@ -20,7 +20,6 @@ export function renderBoard(fen: string): string {
   const board = chess.board();
 
   const lines: string[] = [];
-  lines.push('  a b c d e f g h');
   for (let rank = 0; rank < 8; rank += 1) {
     const row = board[rank];
     const rankLabel = 8 - rank;
@@ -31,7 +30,7 @@ export function renderBoard(fen: string): string {
         return PIECES[key];
       })
       .join(' ');
-    lines.push(`${rankLabel} ${pieces} ${rankLabel}`);
+    lines.push(`${rankLabel} ${pieces}`);
   }
   lines.push('  a b c d e f g h');
 
