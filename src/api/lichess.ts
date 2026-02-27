@@ -278,10 +278,10 @@ export class LichessClient {
       {},
   ) {}
 
-  async getUserMoveStats(user: string, fen: string, side: Side): Promise<MoveStats[]> {
+  async getUserMoveStats(user: string, fen: string, side: Side, sinceTimestampMs: number | null = null): Promise<MoveStats[]> {
     const cachePaths = await this.ensureUserGamesCache(user);
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
-    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, normalizedFen, side);
+    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, normalizedFen, side, sinceTimestampMs);
   }
 
   async getDatabaseMoveStats(fen: string): Promise<Array<MoveStats & { eval?: MoveEval }>> {
@@ -768,8 +768,10 @@ export class LichessClient {
     user: string,
     fen: string,
     side: Side,
+    sinceTimestampMs: number | null = null,
   ): Promise<MoveStats[]> {
-    const filePaths = await this.listMonthlyDataFiles(dataDirectory);
+    const minYearMonth = sinceTimestampMs === null ? null : formatYearMonth(sinceTimestampMs);
+    const filePaths = await this.listMonthlyDataFiles(dataDirectory, minYearMonth);
     const map = new Map<string, MoveStats>();
     for (const filePath of filePaths) {
       const fileStream = createReadStream(filePath, { encoding: 'utf8' });
@@ -783,6 +785,12 @@ export class LichessClient {
             continue;
           }
           const game = this.parseUserGameLine(line, `${filePath}#${lineNumber}`);
+          if (sinceTimestampMs !== null) {
+            const createdAt = typeof game.createdAt === 'number' && Number.isFinite(game.createdAt) ? game.createdAt : null;
+            if (createdAt === null || createdAt < sinceTimestampMs) {
+              continue;
+            }
+          }
           addGameMoveStat(map, game, user, fen, side);
         }
       } finally {
@@ -824,7 +832,7 @@ export class LichessClient {
     );
   }
 
-  private async listMonthlyDataFiles(dataDirectory: string): Promise<string[]> {
+  private async listMonthlyDataFiles(dataDirectory: string, minYearMonth: string | null = null): Promise<string[]> {
     let entries: Dirent[];
     try {
       entries = await readdir(dataDirectory, { withFileTypes: true });
@@ -835,7 +843,16 @@ export class LichessClient {
       throw error;
     }
     return entries
-      .filter((entry) => entry.isFile() && parseYearMonthFromDataFileName(entry.name) !== null)
+      .filter((entry) => {
+        if (!entry.isFile()) {
+          return false;
+        }
+        const yearMonth = parseYearMonthFromDataFileName(entry.name);
+        if (yearMonth === null) {
+          return false;
+        }
+        return minYearMonth === null || yearMonth >= minYearMonth;
+      })
       .map((entry) => resolve(dataDirectory, entry.name))
       .sort((a, b) => basename(a).localeCompare(basename(b)));
   }

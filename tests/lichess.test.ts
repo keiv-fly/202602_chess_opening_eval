@@ -144,6 +144,21 @@ describe('LichessClient', () => {
     expect(monthlyGameCounts).toBe('year_month,games\n2024-01,1\n2024-02,1\n');
   });
 
+  it('filters user move stats by a since timestamp', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-user-filtered-'));
+    tempDirs.push(dataDir);
+    const body = `${JSON.stringify(SAMPLE_GAMES[0])}\n${JSON.stringify(SAMPLE_GAMES[1])}\n`;
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ count: { all: 999 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(body, { status: 200 }));
+    const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+
+    const stats = await client.getUserMoveStats('me', INITIAL_FEN, 'white', Date.UTC(2024, 1, 1));
+
+    expect(stats).toEqual([{ san: 'd4', white: 0, draws: 1, black: 0, total: 1 }]);
+  });
+
   it('uses last_available_at metadata to fetch only new games', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'lichess-user-dump-incremental-'));
     tempDirs.push(dataDir);

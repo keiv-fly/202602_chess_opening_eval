@@ -15,6 +15,14 @@ import type { CombinedMoveRow, Side } from './types.js';
 
 dotenv.config();
 
+const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+type UserTimeFilter = {
+  sinceTimestampMs: number | null;
+  cacheKey: string;
+  label: string;
+};
+
 class App {
   private readonly cache = new SessionCache();
   private readonly lichessClient = new LichessClient(
@@ -44,7 +52,7 @@ class App {
     const lichessUser = process.env.LICHESS_USER || (await rl.question('Lichess username: '));
     const chessComUser = process.env.CHESSCOM_USER || (await rl.question('Chess.com username: '));
 
-    let fen = await rl.question('FEN: ');
+    let fen = this.parseInitialFen(await rl.question('FEN (or SAN moves from start): '));
     const sideInput = (await rl.question('Side (white/black or w/b): ')).trim().toLowerCase();
     let side: Side;
     if (sideInput === 'white' || sideInput === 'w') {
@@ -55,7 +63,10 @@ class App {
       throw new Error('Side must be white/black or w/b.');
     }
 
-    let currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser);
+    const timeFilterInput = await rl.question('Time filter (ISO date/time, YYYY-MM, YYYY; Enter for all): ');
+    const timeFilter = this.parseUserTimeFilter(timeFilterInput);
+
+    let currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
 
     for (;;) {
       const action = await rl.question('Move (SAN), c to export CSV, left arrow (←), or Enter to go back: ');
@@ -91,7 +102,7 @@ class App {
 
       fen = chess.fen();
       side = chess.turn() === 'w' ? 'white' : 'black';
-      currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser);
+      currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
     }
   }
 
@@ -100,18 +111,20 @@ class App {
     side: Side,
     lichessUser: string,
     chessComUser: string,
+    timeFilter: UserTimeFilter,
   ): Promise<CombinedMoveRow[]> {
     this.logLine('\n' + renderBoard(fen));
     this.logLine(`\nFetching stats for ${side}...`);
+    this.logLine(`Time filter: ${timeFilter.label}`);
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
 
-    const lichessUserKey = `lichess-user:${lichessUser}:${side}:${normalizedFen}`;
+    const lichessUserKey = `lichess-user:${lichessUser}:${side}:${timeFilter.cacheKey}:${normalizedFen}`;
     const lichessDbKey = `lichess-db:${normalizedFen}`;
-    const chessComKey = `chesscom:${chessComUser}:${side}:${normalizedFen}`;
+    const chessComKey = `chesscom:${chessComUser}:${side}:${timeFilter.cacheKey}:${normalizedFen}`;
 
     this.logLine('Status: Lichess user request started');
     const lichessUserStats = await this.cache.getOrSet(lichessUserKey, () =>
-      this.lichessClient.getUserMoveStats(lichessUser, normalizedFen, side),
+      this.lichessClient.getUserMoveStats(lichessUser, normalizedFen, side, timeFilter.sinceTimestampMs),
     );
     this.logLine('Status: Lichess user request finished');
 
@@ -120,7 +133,7 @@ class App {
 
     this.logLine('Status: Chess.com user request started');
     const chessComPromise = this.cache.getOrSet(chessComKey, () =>
-      this.chessComClient.getUserMoveStats(chessComUser, normalizedFen, side),
+      this.chessComClient.getUserMoveStats(chessComUser, normalizedFen, side, timeFilter.sinceTimestampMs),
     );
 
     const [lichessDbStats, chessComStats] = await Promise.all([lichessDbPromise, chessComPromise]);
@@ -130,6 +143,119 @@ class App {
     const rows = mergeStats(lichessUserStats, chessComStats, lichessDbStats);
     this.logLine('\n' + renderStatsTable(rows));
     return rows;
+  }
+
+  private parseInitialFen(input: string): string {
+    const trimmedInput = input.trim();
+    if (trimmedInput === '') {
+      return STARTING_FEN;
+    }
+
+    const fenCandidate = new Chess();
+    try {
+      fenCandidate.load(trimmedInput);
+      return fenCandidate.fen();
+    } catch {
+      // Try SAN parsing below.
+    }
+
+    const sanPosition = new Chess();
+    const rawTokens = trimmedInput.replaceAll(',', ' ').split(/\s+/u);
+    let parsedAnyMove = false;
+
+    for (const rawToken of rawTokens) {
+      const san = this.normalizeInitialSanToken(rawToken);
+      if (!san) {
+        continue;
+      }
+      if (san === '1-0' || san === '0-1' || san === '1/2-1/2' || san === '*') {
+        break;
+      }
+
+      const result = sanPosition.move(san, { strict: false });
+      if (!result) {
+        throw new Error('Position input must be a valid FEN or SAN moves from starting position.');
+      }
+      parsedAnyMove = true;
+    }
+
+    if (!parsedAnyMove) {
+      throw new Error('Position input must be a valid FEN or SAN moves from starting position.');
+    }
+    return sanPosition.fen();
+  }
+
+  private normalizeInitialSanToken(token: string): string | null {
+    const trimmedToken = token.trim();
+    if (trimmedToken === '') {
+      return null;
+    }
+    if (/^\d+\.(?:\.\.)?$/u.test(trimmedToken)) {
+      return null;
+    }
+
+    const tokenWithoutMoveNumber = trimmedToken.replace(/^\d+\.(?:\.\.)?/u, '').replace(/^\.\.\./u, '');
+    if (tokenWithoutMoveNumber === '') {
+      return null;
+    }
+
+    const tokenWithoutAnnotations = tokenWithoutMoveNumber.replace(/[!?]+$/u, '');
+    if (tokenWithoutAnnotations === '') {
+      return null;
+    }
+    return tokenWithoutAnnotations;
+  }
+
+  private parseUserTimeFilter(input: string): UserTimeFilter {
+    const trimmed = input.trim();
+    if (trimmed === '') {
+      return {
+        sinceTimestampMs: null,
+        cacheKey: 'all-time',
+        label: 'all-time',
+      };
+    }
+
+    const yearMatch = /^(\d{4})$/u.exec(trimmed);
+    if (yearMatch) {
+      const year = Number.parseInt(yearMatch[1], 10);
+      const sinceTimestampMs = Date.UTC(year, 0, 1, 0, 0, 0, 0);
+      return {
+        sinceTimestampMs,
+        cacheKey: `since-${sinceTimestampMs}`,
+        label: `since ${new Date(sinceTimestampMs).toISOString()} (${trimmed} => Jan 1)`,
+      };
+    }
+
+    const yearMonthMatch = /^(\d{4})-(\d{2})$/u.exec(trimmed);
+    if (yearMonthMatch) {
+      const year = Number.parseInt(yearMonthMatch[1], 10);
+      const month = Number.parseInt(yearMonthMatch[2], 10);
+      if (month < 1 || month > 12) {
+        throw new Error('Time filter month must be in 01..12.');
+      }
+      const sinceTimestampMs = Date.UTC(year, month - 1, 1, 0, 0, 0, 0);
+      return {
+        sinceTimestampMs,
+        cacheKey: `since-${sinceTimestampMs}`,
+        label: `since ${new Date(sinceTimestampMs).toISOString()} (${trimmed} => 1st day of month)`,
+      };
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}(?:[Tt ].*)?$/u.test(trimmed)) {
+      throw new Error('Time filter must be ISO date/time, YYYY-MM, or YYYY.');
+    }
+
+    const parsedTimestamp = Date.parse(trimmed);
+    if (Number.isNaN(parsedTimestamp)) {
+      throw new Error('Time filter must be ISO date/time, YYYY-MM, or YYYY.');
+    }
+
+    return {
+      sinceTimestampMs: parsedTimestamp,
+      cacheKey: `since-${parsedTimestamp}`,
+      label: `since ${new Date(parsedTimestamp).toISOString()}`,
+    };
   }
 
   private async exportRowsToCsv(rows: CombinedMoveRow[], fen: string, side: Side): Promise<void> {

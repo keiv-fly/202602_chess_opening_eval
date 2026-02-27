@@ -45,7 +45,9 @@ npm run start
 (`npm run dev` runs the same command in this project.)
 
 You will be prompted for:
-- FEN
+- Position as either:
+  - FEN
+  - SAN moves from starting position (for example, `e4 e5 Nf3`); empty input uses starting position
 - Side (`white`/`black` or `w`/`b`)
 
 After results are shown, you can:

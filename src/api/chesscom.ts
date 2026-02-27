@@ -8,12 +8,15 @@ import type { MoveStats, Side } from '../types.js';
 import { fetchWith429Retries } from './retry.js';
 
 type ArchivesResponse = { archives: string[] };
+type ChessComUserGame = {
+  pgn: string;
+  white: { username: string; result: string };
+  black: { username: string; result: string };
+  end_time?: number;
+};
+
 type GamesResponse = {
-  games: Array<{
-    pgn: string;
-    white: { username: string; result: string };
-    black: { username: string; result: string };
-  }>;
+  games: ChessComUserGame[];
 };
 
 type RequestOptions = {
@@ -76,13 +79,79 @@ function parseYearMonthFromDataFileName(fileName: string): string | null {
   return match ? match[1] : null;
 }
 
+function formatYearMonth(timestampMs: number): string {
+  const date = new Date(timestampMs);
+  const year = String(date.getUTCFullYear());
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
 function isMissingFileError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
+function parsePgnTagValue(pgn: string, tag: string): string | null {
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = pgn.match(new RegExp(`\\[${escapedTag}\\s+"([^"]+)"\\]`, 'u'));
+  return match?.[1]?.trim() || null;
+}
+
+function extractGameTimestampMs(game: ChessComUserGame): number | null {
+  if (typeof game.end_time === 'number' && Number.isFinite(game.end_time)) {
+    return game.end_time >= 1_000_000_000_000 ? game.end_time : game.end_time * 1000;
+  }
+
+  const dateText = parsePgnTagValue(game.pgn, 'UTCDate') ?? parsePgnTagValue(game.pgn, 'Date');
+  if (!dateText) {
+    return null;
+  }
+  const dateMatch = /^(\d{4})\.(\d{2})\.(\d{2})$/u.exec(dateText);
+  if (!dateMatch) {
+    return null;
+  }
+
+  const year = Number.parseInt(dateMatch[1], 10);
+  const month = Number.parseInt(dateMatch[2], 10);
+  const day = Number.parseInt(dateMatch[3], 10);
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+  const timeText = parsePgnTagValue(game.pgn, 'UTCTime');
+  if (timeText) {
+    const timeMatch = /^(\d{2}):(\d{2}):(\d{2})$/u.exec(timeText);
+    if (!timeMatch) {
+      return null;
+    }
+    hour = Number.parseInt(timeMatch[1], 10);
+    minute = Number.parseInt(timeMatch[2], 10);
+    second = Number.parseInt(timeMatch[3], 10);
+    if (hour > 23 || minute > 59 || second > 59) {
+      return null;
+    }
+  }
+
+  const timestampMs = Date.UTC(year, month - 1, day, hour, minute, second, 0);
+  const parsedDate = new Date(timestampMs);
+  if (
+    parsedDate.getUTCFullYear() !== year ||
+    parsedDate.getUTCMonth() !== month - 1 ||
+    parsedDate.getUTCDate() !== day ||
+    parsedDate.getUTCHours() !== hour ||
+    parsedDate.getUTCMinutes() !== minute ||
+    parsedDate.getUTCSeconds() !== second
+  ) {
+    return null;
+  }
+  return timestampMs;
+}
+
 function addGameMoveStat(
   map: Map<string, MoveStats>,
-  game: GamesResponse['games'][number],
+  game: ChessComUserGame,
   username: string,
   fen: string,
   side: Side,
@@ -138,7 +207,7 @@ function sortMoveStats(stats: Iterable<MoveStats>): MoveStats[] {
 }
 
 export function moveStatsFromPgnGames(
-  games: Iterable<GamesResponse['games'][number]>,
+  games: Iterable<ChessComUserGame>,
   username: string,
   fen: string,
   side: Side,
@@ -161,10 +230,15 @@ export class ChessComClient {
     private readonly onUserDumpProgress: (loadedFiles: number, totalFiles: number, done: boolean) => void = () => {},
   ) {}
 
-  async getUserMoveStats(username: string, fen: string, side: Side): Promise<MoveStats[]> {
+  async getUserMoveStats(
+    username: string,
+    fen: string,
+    side: Side,
+    sinceTimestampMs: number | null = null,
+  ): Promise<MoveStats[]> {
     const cachePaths = await this.ensureUserGamesCache(username);
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
-    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, username, normalizedFen, side);
+    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, username, normalizedFen, side, sinceTimestampMs);
   }
 
   private async ensureUserGamesCache(username: string): Promise<UserCachePaths> {
@@ -225,8 +299,10 @@ export class ChessComClient {
     username: string,
     fen: string,
     side: Side,
+    sinceTimestampMs: number | null = null,
   ): Promise<MoveStats[]> {
-    const filePaths = await this.listMonthlyDataFiles(dataDirectory);
+    const minYearMonth = sinceTimestampMs === null ? null : formatYearMonth(sinceTimestampMs);
+    const filePaths = await this.listMonthlyDataFiles(dataDirectory, minYearMonth);
     const map = new Map<string, MoveStats>();
     for (const filePath of filePaths) {
       const fileStream = createReadStream(filePath, { encoding: 'utf8' });
@@ -238,6 +314,12 @@ export class ChessComClient {
             continue;
           }
           const game = this.parseGameLine(line, filePath);
+          if (sinceTimestampMs !== null) {
+            const gameTimestampMs = extractGameTimestampMs(game);
+            if (gameTimestampMs === null || gameTimestampMs < sinceTimestampMs) {
+              continue;
+            }
+          }
           addGameMoveStat(map, game, username, fen, side);
         }
       } finally {
@@ -248,9 +330,9 @@ export class ChessComClient {
     return sortMoveStats(map.values());
   }
 
-  private parseGameLine(line: string, source: string): GamesResponse['games'][number] {
+  private parseGameLine(line: string, source: string): ChessComUserGame {
     try {
-      return JSON.parse(line) as GamesResponse['games'][number];
+      return JSON.parse(line) as ChessComUserGame;
     } catch (error: unknown) {
       const parseMessage = error instanceof Error ? error.message : String(error);
       this.onNetworkStatus(`Network: NDJSON parse failed from ${source}; received line:\n${line}`);
@@ -267,17 +349,13 @@ export class ChessComClient {
     );
   }
 
-  private async writeMonthlyGames(
-    dataDirectory: string,
-    yearMonth: string,
-    games: GamesResponse['games'],
-  ): Promise<void> {
+  private async writeMonthlyGames(dataDirectory: string, yearMonth: string, games: ChessComUserGame[]): Promise<void> {
     const filePath = resolve(dataDirectory, `${yearMonth}.ndjson`);
     const body = games.map((game) => JSON.stringify(game)).join('\n');
     await writeFile(filePath, body === '' ? '' : `${body}\n`, 'utf8');
   }
 
-  private async listMonthlyDataFiles(dataDirectory: string): Promise<string[]> {
+  private async listMonthlyDataFiles(dataDirectory: string, minYearMonth: string | null = null): Promise<string[]> {
     let entries: Dirent[];
     try {
       entries = await readdir(dataDirectory, { withFileTypes: true });
@@ -289,7 +367,16 @@ export class ChessComClient {
     }
 
     return entries
-      .filter((entry) => entry.isFile() && parseYearMonthFromDataFileName(entry.name) !== null)
+      .filter((entry) => {
+        if (!entry.isFile()) {
+          return false;
+        }
+        const yearMonth = parseYearMonthFromDataFileName(entry.name);
+        if (yearMonth === null) {
+          return false;
+        }
+        return minYearMonth === null || yearMonth >= minYearMonth;
+      })
       .map((entry) => resolve(dataDirectory, entry.name))
       .sort((a, b) => basename(a).localeCompare(basename(b)));
   }

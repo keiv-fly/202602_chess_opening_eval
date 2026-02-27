@@ -129,6 +129,48 @@ describe('ChessComClient', () => {
     expect(progressEvents[progressEvents.length - 1]).toEqual({ loaded: 2, total: 2, done: true });
   });
 
+  it('filters user move stats by a since timestamp', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-user-filtered-'));
+    tempDirs.push(dataDir);
+    const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const januaryGames = [
+      {
+        pgn: '[Event "Live Chess"]\n[Site "Chess.com"]\n[Result "1-0"]\n\n1. e4 e5 1-0',
+        white: { username: 'me', result: 'win' },
+        black: { username: 'op', result: 'resigned' },
+        end_time: Math.floor(Date.UTC(2024, 0, 20) / 1000),
+      },
+    ];
+    const februaryGames = [
+      {
+        pgn: '[Event "Live Chess"]\n[Site "Chess.com"]\n[Result "1-0"]\n\n1. d4 d5 1-0',
+        white: { username: 'me', result: 'win' },
+        black: { username: 'op2', result: 'resigned' },
+        end_time: Math.floor(Date.UTC(2024, 1, 2) / 1000),
+      },
+    ];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            archives: [
+              'https://api.chess.com/pub/player/me/games/2024/01',
+              'https://api.chess.com/pub/player/me/games/2024/02',
+            ],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ games: januaryGames }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ games: februaryGames }), { status: 200 }));
+    const client = new ChessComClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, dataDir);
+
+    const stats = await client.getUserMoveStats('me', initialFen, 'white', Date.UTC(2024, 1, 1));
+
+    expect(stats).toEqual([{ san: 'd4', white: 1, draws: 0, black: 0, total: 1 }]);
+  });
+
   it('does not emit chess.com network started lines', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-no-started-lines-'));
     tempDirs.push(dataDir);
