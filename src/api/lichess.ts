@@ -45,6 +45,7 @@ type LichessDatabaseCachePayload = {
 type LichessUserGame = {
   createdAt?: number;
   moves?: string;
+  variant?: string;
   winner?: 'white' | 'black';
   status?: string;
   pgn?: string;
@@ -92,6 +93,8 @@ const LICHESS_DATABASE_FEN_DIRECTORY = 'fen';
 const LICHESS_DATABASE_MOVE_LIMIT = 50;
 const LICHESS_EVAL_CACHE_ROOT = 'lichess_eval';
 const LICHESS_EVAL_FEN_DIRECTORY = 'fen';
+const LICHESS_STANDARD_VARIANT = 'standard';
+const LICHESS_STANDARD_PERF_TYPES = 'ultraBullet,bullet,blitz,rapid,classical,correspondence';
 
 function sanitizeUserForFileName(user: string): string {
   return user.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -123,12 +126,20 @@ function gameOutcome(game: LichessUserGame): 'white' | 'black' | 'draw' | null {
   return null;
 }
 
-function parsePgnTagValue(pgn: string | undefined, tag: 'White' | 'Black'): string | null {
+function parsePgnTagValue(pgn: string | undefined, tag: string): string | null {
   if (!pgn) {
     return null;
   }
   const match = pgn.match(new RegExp(`\\[${tag}\\s+"([^"]+)"\\]`));
   return match?.[1]?.trim() || null;
+}
+
+function isStandardLichessGame(game: LichessUserGame): boolean {
+  const variant = game.variant ?? parsePgnTagValue(game.pgn, 'Variant');
+  if (variant === undefined || variant === null) {
+    return true;
+  }
+  return variant.trim().toLowerCase() === LICHESS_STANDARD_VARIANT;
 }
 
 function userNameToCompare(name: string | undefined): string | null {
@@ -157,12 +168,20 @@ function applyMove(chess: Chess, moveText: string): string | null {
     const from = uciMatch[1];
     const to = uciMatch[2];
     const promotion = uciMatch[3]?.toLowerCase() as 'q' | 'r' | 'b' | 'n' | undefined;
-    const move = chess.move({ from, to, promotion });
-    return move?.san ?? null;
+    try {
+      const move = chess.move({ from, to, promotion });
+      return move?.san ?? null;
+    } catch {
+      return null;
+    }
   }
 
-  const sanMove = chess.move(trimmed, { strict: false });
-  return sanMove?.san ?? null;
+  try {
+    const sanMove = chess.move(trimmed, { strict: false });
+    return sanMove?.san ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function mapDatabaseMoves(
@@ -188,6 +207,10 @@ function addGameMoveStat(
   fen: string,
   side: Side,
 ): void {
+  if (!isStandardLichessGame(game)) {
+    return;
+  }
+
   const normalizedTargetFen = normalizeFenWithoutMoveCounters(fen);
   const targetUser = username.toLowerCase();
   const whiteUser = extractPlayerName(game, 'white');
@@ -308,6 +331,7 @@ export class LichessClient {
     const url = new URL('/lichess', this.baseUrl);
     url.searchParams.set('fen', normalizedFen);
     url.searchParams.set('moves', String(LICHESS_DATABASE_MOVE_LIMIT));
+    url.searchParams.set('variant', LICHESS_STANDARD_VARIANT);
 
     const data = await this.requestJson<{ moves?: LichessDbMove[] }>(url);
     const moves = data.moves ?? [];
@@ -692,6 +716,7 @@ export class LichessClient {
         url.searchParams.set('opening', 'false');
         url.searchParams.set('clocks', 'false');
         url.searchParams.set('evals', 'false');
+        url.searchParams.set('perfType', LICHESS_STANDARD_PERF_TYPES);
         if (since !== null) {
           url.searchParams.set('since', String(since));
         }

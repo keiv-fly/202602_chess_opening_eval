@@ -72,6 +72,37 @@ describe('LichessClient', () => {
     expect(stats).toEqual([{ san: 'Nf3', white: 1, draws: 0, black: 0, total: 1 }]);
   });
 
+  it('ignores non-standard variant games when collecting user stats', () => {
+    const stats = moveStatsFromLichessGames(
+      [
+        {
+          createdAt: Date.UTC(2026, 1, 27),
+          variant: 'crazyhouse',
+          moves: 'e4 d5 exd5 Nf6 c4 g6 Nf3 Qd6 Bd3 e5 Nc3 Bg4 h3 Bxf3 Qxf3 N@f4',
+          winner: 'white',
+          players: {
+            white: { user: { name: 'me', id: 'me' } },
+            black: { user: { name: 'op1', id: 'op1' } },
+          },
+        },
+        {
+          createdAt: Date.UTC(2026, 1, 28),
+          variant: 'standard',
+          moves: 'e4 c5 Nf3 e6',
+          winner: 'white',
+          players: {
+            white: { user: { name: 'me', id: 'me' } },
+            black: { user: { name: 'op2', id: 'op2' } },
+          },
+        },
+      ],
+      'me',
+      FEN_AFTER_E4_C5,
+      'white',
+    );
+    expect(stats).toEqual([{ san: 'Nf3', white: 1, draws: 0, black: 0, total: 1 }]);
+  });
+
   it('matches move stats while ignoring FEN move counters', () => {
     const stats = moveStatsFromLichessGames(
       [
@@ -123,6 +154,9 @@ describe('LichessClient', () => {
     expect(firstCallUrl.toString()).toContain('/api/user/me');
     expect(secondCallUrl.toString()).toContain('/api/games/user/me');
     expect(secondCallUrl.searchParams.get('max')).toBe('100000');
+    expect(secondCallUrl.searchParams.get('perfType')).toBe(
+      'ultraBullet,bullet,blitz,rapid,classical,correspondence',
+    );
     expect(progressEvents).toEqual([
       { loaded: 0, total: 999, done: false },
       { loaded: 2, total: 999, done: false },
@@ -304,6 +338,7 @@ describe('LichessClient', () => {
     const dbRequestUrl = fetchImpl.mock.calls[0][0] as URL;
     expect(dbRequestUrl.searchParams.get('moves')).toBe('50');
     expect(dbRequestUrl.searchParams.get('fen')).toBe(normalizedFen);
+    expect(dbRequestUrl.searchParams.get('variant')).toBe('standard');
 
     const evalRequestUrl = fetchImpl.mock.calls[1][0] as URL;
     expect(evalRequestUrl.pathname).toBe('/api/cloud-eval');

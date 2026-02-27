@@ -13,6 +13,7 @@ type ChessComUserGame = {
   white: { username: string; result: string };
   black: { username: string; result: string };
   end_time?: number;
+  rules?: string;
 };
 
 type GamesResponse = {
@@ -96,6 +97,18 @@ function parsePgnTagValue(pgn: string, tag: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
+function isStandardChessComGame(game: ChessComUserGame): boolean {
+  const normalizedRules = game.rules?.trim().toLowerCase();
+  if (normalizedRules && normalizedRules !== 'chess') {
+    return false;
+  }
+  const variantTag = parsePgnTagValue(game.pgn, 'Variant');
+  if (!variantTag) {
+    return true;
+  }
+  return variantTag.trim().toLowerCase() === 'standard';
+}
+
 function extractGameTimestampMs(game: ChessComUserGame): number | null {
   if (typeof game.end_time === 'number' && Number.isFinite(game.end_time)) {
     return game.end_time >= 1_000_000_000_000 ? game.end_time : game.end_time * 1000;
@@ -156,6 +169,10 @@ function addGameMoveStat(
   fen: string,
   side: Side,
 ): void {
+  if (!isStandardChessComGame(game)) {
+    return;
+  }
+
   const normalizedTargetFen = normalizeFenWithoutMoveCounters(fen);
   const targetUser = username.toLowerCase();
   const isWhite = game.white.username.toLowerCase() === targetUser;

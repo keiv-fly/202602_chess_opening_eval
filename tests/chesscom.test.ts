@@ -51,6 +51,35 @@ describe('moveStatsFromPgnGames', () => {
     expect(stats).toHaveLength(1);
     expect(stats[0]).toMatchObject({ san: 'e4', total: 2, white: 1, black: 1, draws: 0 });
   });
+
+  it('ignores non-standard variant games', () => {
+    const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const stats = moveStatsFromPgnGames(
+      [
+        {
+          pgn: '[Event "Live Chess"]\n[Site "Chess.com"]\n[Result "1-0"]\n\n1. e4 e5 1-0',
+          white: { username: 'me', result: 'win' },
+          black: { username: 'op', result: 'resigned' },
+        },
+        {
+          pgn: '[Event "Live Chess"]\n[Site "Chess.com"]\n[Variant "Chess960"]\n[Result "1-0"]\n\n1. e4 e5 1-0',
+          white: { username: 'me', result: 'win' },
+          black: { username: 'op2', result: 'resigned' },
+        },
+        {
+          pgn: '[Event "Live Chess"]\n[Site "Chess.com"]\n[Result "1-0"]\n\n1. e4 e5 1-0',
+          white: { username: 'me', result: 'win' },
+          black: { username: 'op3', result: 'resigned' },
+          rules: 'chess960',
+        },
+      ],
+      'me',
+      initialFen,
+      'white',
+    );
+
+    expect(stats).toEqual([{ san: 'e4', white: 1, draws: 0, black: 0, total: 1 }]);
+  });
 });
 
 describe('ChessComClient', () => {
