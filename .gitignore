@@ -2,4 +2,5 @@ node_modules/
 dist/
 .env
 data_in/
+data_out/
 player.ndjson

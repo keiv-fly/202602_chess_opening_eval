@@ -1,5 +1,32 @@
 import Table from 'cli-table3';
-import type { CombinedMoveRow, MoveEval, MoveStats } from './types.js';
+import type { CombinedMoveRow, MoveEval, MoveStats, Side } from './types.js';
+
+export type CsvExportContext = {
+  fen: string;
+  side: Side;
+};
+
+const SOURCE_SUFFIXES = [
+  'total',
+  'share_percent',
+  'white_count',
+  'draw_count',
+  'black_count',
+  'white_percent',
+  'draw_percent',
+  'black_percent',
+] as const;
+const SOURCE_PREFIXES = ['source_lichess_user', 'source_chesscom_user', 'source_lichess_db'] as const;
+const CSV_COLUMNS = [
+  'position_fen',
+  'position_side_to_move',
+  'move_rank',
+  'move_san',
+  'move_eval_cp',
+  'move_eval_mate',
+  'move_eval_depth',
+  ...SOURCE_PREFIXES.flatMap((prefix) => SOURCE_SUFFIXES.map((suffix) => `${prefix}_${suffix}`)),
+] as const;
 
 export function mergeStats(
   lichessUser: MoveStats[],
@@ -110,4 +137,72 @@ export function renderStatsTable(rows: CombinedMoveRow[]): string {
   }
 
   return table.toString();
+}
+
+function toOneDecimal(value: number): number {
+  return Number(value.toFixed(1));
+}
+
+function toPercent(part: number, total: number): number | undefined {
+  if (total <= 0) return undefined;
+  return toOneDecimal((part / total) * 100);
+}
+
+function addSourceColumns(
+  record: Record<string, string | number>,
+  prefix: (typeof SOURCE_PREFIXES)[number],
+  stats: MoveStats | undefined,
+  sourceTotal: number,
+): void {
+  if (!stats || stats.total <= 0) {
+    for (const suffix of SOURCE_SUFFIXES) {
+      record[`${prefix}_${suffix}`] = '';
+    }
+    return;
+  }
+
+  record[`${prefix}_total`] = stats.total;
+  record[`${prefix}_share_percent`] = toPercent(stats.total, sourceTotal) ?? '';
+  record[`${prefix}_white_count`] = stats.white;
+  record[`${prefix}_draw_count`] = stats.draws;
+  record[`${prefix}_black_count`] = stats.black;
+  record[`${prefix}_white_percent`] = toPercent(stats.white, stats.total) ?? '';
+  record[`${prefix}_draw_percent`] = toPercent(stats.draws, stats.total) ?? '';
+  record[`${prefix}_black_percent`] = toPercent(stats.black, stats.total) ?? '';
+}
+
+function csvEscape(value: string | number): string {
+  const asString = String(value);
+  if (!/[,"\n\r]/.test(asString)) {
+    return asString;
+  }
+  return `"${asString.replaceAll('"', '""')}"`;
+}
+
+export function renderStatsCsv(rows: CombinedMoveRow[], context: CsvExportContext): string {
+  const sourceTotals = {
+    lichessUser: rows.reduce((sum, row) => sum + (row.lichessUser?.total ?? 0), 0),
+    chessComUser: rows.reduce((sum, row) => sum + (row.chessComUser?.total ?? 0), 0),
+    lichessDb: rows.reduce((sum, row) => sum + (row.lichessDb?.total ?? 0), 0),
+  };
+
+  const bodyLines = rows.map((row, index) => {
+    const record: Record<string, string | number> = {
+      position_fen: context.fen,
+      position_side_to_move: context.side,
+      move_rank: index + 1,
+      move_san: row.san,
+      move_eval_cp: row.eval?.cp ?? '',
+      move_eval_mate: row.eval?.mate ?? '',
+      move_eval_depth: row.eval?.depth ?? '',
+    };
+
+    addSourceColumns(record, 'source_lichess_user', row.lichessUser, sourceTotals.lichessUser);
+    addSourceColumns(record, 'source_chesscom_user', row.chessComUser, sourceTotals.chessComUser);
+    addSourceColumns(record, 'source_lichess_db', row.lichessDb, sourceTotals.lichessDb);
+
+    return CSV_COLUMNS.map((column) => csvEscape(record[column] ?? '')).join(',');
+  });
+
+  return [CSV_COLUMNS.join(','), ...bodyLines].join('\n');
 }

@@ -50,6 +50,7 @@ You will be prompted for:
 
 After results are shown, you can:
 - Enter a move in SAN notation (for example, `Nf3`)
+- Enter `c` to export the currently displayed table to `data_out/YYYYMMDD_HHMMSS.csv`
 - Press Enter on an empty prompt to go back one move in history
 - Use left arrow and submit to go back one move
 

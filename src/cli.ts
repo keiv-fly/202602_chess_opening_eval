@@ -1,15 +1,17 @@
 import { Chess } from 'chess.js';
 import cliProgress from 'cli-progress';
 import * as dotenv from 'dotenv';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { renderBoard } from './board.js';
 import { SessionCache } from './cache.js';
 import { LichessClient } from './api/lichess.js';
 import { ChessComClient } from './api/chesscom.js';
-import { mergeStats, renderStatsTable } from './evaluator.js';
+import { mergeStats, renderStatsCsv, renderStatsTable } from './evaluator.js';
 import { normalizeFenWithoutMoveCounters } from './fen.js';
-import type { Side } from './types.js';
+import type { CombinedMoveRow, Side } from './types.js';
 
 dotenv.config();
 
@@ -53,11 +55,17 @@ class App {
       throw new Error('Side must be white/black or w/b.');
     }
 
-    await this.evaluatePosition(fen, side, lichessUser, chessComUser);
+    let currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser);
 
     for (;;) {
-      const action = await rl.question('Move (SAN), left arrow (←), or Enter to go back: ');
-      if (action.trim() === '') {
+      const action = await rl.question('Move (SAN), c to export CSV, left arrow (←), or Enter to go back: ');
+      const trimmedAction = action.trim();
+      if (trimmedAction.toLowerCase() === 'c') {
+        await this.exportRowsToCsv(currentRows, fen, side);
+        continue;
+      }
+
+      if (trimmedAction === '') {
         if (this.history.length === 0) {
           this.logLine('No history yet.');
           continue;
@@ -66,7 +74,7 @@ class App {
       } else if (action.includes('\u001b[D')) {
         this.history.pop();
       } else {
-        this.history.push(action.trim());
+        this.history.push(trimmedAction);
       }
 
       const chess = new Chess();
@@ -83,11 +91,16 @@ class App {
 
       fen = chess.fen();
       side = chess.turn() === 'w' ? 'white' : 'black';
-      await this.evaluatePosition(fen, side, lichessUser, chessComUser);
+      currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser);
     }
   }
 
-  private async evaluatePosition(fen: string, side: Side, lichessUser: string, chessComUser: string): Promise<void> {
+  private async evaluatePosition(
+    fen: string,
+    side: Side,
+    lichessUser: string,
+    chessComUser: string,
+  ): Promise<CombinedMoveRow[]> {
     this.logLine('\n' + renderBoard(fen));
     this.logLine(`\nFetching stats for ${side}...`);
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
@@ -116,6 +129,23 @@ class App {
 
     const rows = mergeStats(lichessUserStats, chessComStats, lichessDbStats);
     this.logLine('\n' + renderStatsTable(rows));
+    return rows;
+  }
+
+  private async exportRowsToCsv(rows: CombinedMoveRow[], fen: string, side: Side): Promise<void> {
+    const timestamp = this.formatTimestamp(new Date());
+    const outputDir = path.join(process.cwd(), 'data_out');
+    const filePath = path.join(outputDir, `${timestamp}.csv`);
+    const csv = renderStatsCsv(rows, { fen, side });
+
+    await mkdir(outputDir, { recursive: true });
+    await writeFile(filePath, csv, 'utf8');
+    this.logLine(`CSV exported: ${filePath}`);
+  }
+
+  private formatTimestamp(date: Date): string {
+    const pad2 = (value: number): string => String(value).padStart(2, '0');
+    return `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}_${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`;
   }
 
   private logStatus(message: string): void {
