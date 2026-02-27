@@ -43,7 +43,7 @@ npm run start
 
 You will be prompted for:
 - FEN
-- Side (`white` or `black`)
+- Side (`white`/`black` or `w`/`b`)
 
 After results are shown, you can:
 - Enter a move in SAN notation (for example, `Nf3`)
