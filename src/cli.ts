@@ -11,7 +11,7 @@ import { LichessClient } from './api/lichess.js';
 import { ChessComClient } from './api/chesscom.js';
 import { mergeStats, renderStatsCsv, renderStatsTable } from './evaluator.js';
 import { normalizeFenWithoutMoveCounters } from './fen.js';
-import type { CombinedMoveRow, Side } from './types.js';
+import type { CombinedMoveRow, MoveStats, Side } from './types.js';
 
 dotenv.config();
 
@@ -21,6 +21,12 @@ type UserTimeFilter = {
   sinceTimestampMs: number | null;
   cacheKey: string;
   label: string;
+};
+
+type InitialPositionInput = {
+  baseFen: string;
+  currentFen: string;
+  initialHistory: string[];
 };
 
 class App {
@@ -47,13 +53,18 @@ class App {
   private lichessDumpProgressTotal = 0;
   private chessComDumpProgress: cliProgress.SingleBar | null = null;
   private chessComDumpProgressTotal = 0;
+  private stripLeadingStopKeyOnNextMovePrompt = false;
 
   async run(): Promise<void> {
     const rl = readline.createInterface({ input, output });
     const lichessUser = process.env.LICHESS_USER || (await rl.question('Lichess username: '));
     const chessComUser = process.env.CHESSCOM_USER || (await rl.question('Chess.com username: '));
 
-    let fen = this.parseInitialFen(await rl.question('FEN (or SAN moves from start): '));
+    const initialPosition = this.parseInitialPosition(await rl.question('FEN (or SAN moves from start): '));
+    const baseFen = initialPosition.baseFen;
+    this.history.length = 0;
+    this.history.push(...initialPosition.initialHistory);
+    let fen = initialPosition.currentFen;
     const sideInput = (await rl.question('Side (white/black or w/b): ')).trim().toLowerCase();
     let side: Side;
     if (sideInput === 'white' || sideInput === 'w') {
@@ -70,13 +81,22 @@ class App {
     let currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
 
     for (;;) {
-      const action = await rl.question('Move (SAN), c to export CSV, left arrow (←), or Enter to go back: ');
+      if (this.stripLeadingStopKeyOnNextMovePrompt) {
+        // Clear any buffered line input captured while "s" was used to stop Lichess retries.
+        rl.write('', { ctrl: true, name: 'u' });
+      }
+      let action = await rl.question('Move (SAN), c to export CSV, left arrow (←), or Enter to go back: ');
+      if (this.stripLeadingStopKeyOnNextMovePrompt && action.toLowerCase().startsWith('s')) {
+        action = action.slice(1);
+      }
+      this.stripLeadingStopKeyOnNextMovePrompt = false;
       const trimmedAction = action.trim();
       if (trimmedAction.toLowerCase() === 'c') {
         await this.exportRowsToCsv(currentRows, fen, side);
         continue;
       }
 
+      let attemptedMove: string | null = null;
       if (trimmedAction === '') {
         if (this.history.length === 0) {
           this.logLine('No history yet.');
@@ -84,25 +104,33 @@ class App {
         }
         this.history.pop();
       } else if (action.includes('\u001b[D')) {
+        if (this.history.length === 0) {
+          this.logLine('No history yet.');
+          continue;
+        }
         this.history.pop();
       } else {
+        attemptedMove = trimmedAction;
         this.history.push(trimmedAction);
       }
 
-      const chess = new Chess();
-      chess.load(fen);
-
-      for (const move of this.history) {
-        const result = chess.move(move, { strict: false });
-        if (!result) {
-          this.logLine(`Invalid move in history: ${move}. Resetting history.`);
+      let resolvedPosition = this.resolvePositionFromHistory(baseFen, this.history);
+      if (!resolvedPosition) {
+        if (attemptedMove !== null) {
+          this.history.pop();
+          this.logLine(`Invalid move: ${attemptedMove}`);
+        } else {
+          this.logLine('Invalid move in history. Resetting history.');
           this.history.length = 0;
-          break;
         }
+        resolvedPosition = this.resolvePositionFromHistory(baseFen, this.history);
       }
 
-      fen = chess.fen();
-      side = chess.turn() === 'w' ? 'white' : 'black';
+      if (!resolvedPosition) {
+        throw new Error('Failed to resolve position from base FEN and history.');
+      }
+
+      fen = resolvedPosition.fen;
       currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
     }
   }
@@ -141,27 +169,61 @@ class App {
     this.logLine('Status: Lichess DB request finished');
     this.logLine('Status: Chess.com user request finished');
 
+    this.logSourceTotals(lichessUserStats, chessComStats, lichessDbStats);
+
     const rows = mergeStats(lichessUserStats, chessComStats, lichessDbStats);
     this.logLine('\n' + renderStatsTable(rows));
     return rows;
   }
 
-  private parseInitialFen(input: string): string {
+  private logSourceTotals(
+    lichessUserStats: MoveStats[],
+    chessComStats: MoveStats[],
+    lichessDbStats: Array<MoveStats & { eval?: unknown }>,
+  ): void {
+    const lichessUserGames = lichessUserStats.reduce((sum, row) => sum + row.total, 0);
+    const chessComGames = chessComStats.reduce((sum, row) => sum + row.total, 0);
+    const lichessDbGames = lichessDbStats.reduce((sum, row) => sum + row.total, 0);
+
+    this.logLine(
+      `Status: Source matches -> Lichess user ${lichessUserGames} games (${lichessUserStats.length} moves), ` +
+        `Chess.com user ${chessComGames} games (${chessComStats.length} moves), ` +
+        `Lichess DB ${lichessDbGames} games (${lichessDbStats.length} moves)`,
+    );
+
+    if (chessComGames === 0) {
+      this.logLine(
+        'Status: Chess.com has no matching games for this exact FEN + side + time filter (independent from Lichess retry stop).',
+      );
+    }
+  }
+
+  private parseInitialPosition(input: string): InitialPositionInput {
     const trimmedInput = input.trim();
     if (trimmedInput === '') {
-      return STARTING_FEN;
+      return {
+        baseFen: STARTING_FEN,
+        currentFen: STARTING_FEN,
+        initialHistory: [],
+      };
     }
 
     const fenCandidate = new Chess();
     try {
       fenCandidate.load(trimmedInput);
-      return fenCandidate.fen();
+      const normalizedFen = fenCandidate.fen();
+      return {
+        baseFen: normalizedFen,
+        currentFen: normalizedFen,
+        initialHistory: [],
+      };
     } catch {
       // Try SAN parsing below.
     }
 
     const sanPosition = new Chess();
     const rawTokens = trimmedInput.replaceAll(',', ' ').split(/\s+/u);
+    const initialHistory: string[] = [];
     let parsedAnyMove = false;
 
     for (const rawToken of rawTokens) {
@@ -177,13 +239,33 @@ class App {
       if (!result) {
         throw new Error('Position input must be a valid FEN or SAN moves from starting position.');
       }
+      initialHistory.push(result.san);
       parsedAnyMove = true;
     }
 
     if (!parsedAnyMove) {
       throw new Error('Position input must be a valid FEN or SAN moves from starting position.');
     }
-    return sanPosition.fen();
+    return {
+      baseFen: STARTING_FEN,
+      currentFen: sanPosition.fen(),
+      initialHistory,
+    };
+  }
+
+  private resolvePositionFromHistory(baseFen: string, history: string[]): { fen: string; side: Side } | null {
+    const chess = new Chess();
+    chess.load(baseFen);
+    for (const move of history) {
+      const result = chess.move(move, { strict: false });
+      if (!result) {
+        return null;
+      }
+    }
+    return {
+      fen: chess.fen(),
+      side: chess.turn() === 'w' ? 'white' : 'black',
+    };
   }
 
   private normalizeInitialSanToken(token: string): string | null {
@@ -276,6 +358,9 @@ class App {
   }
 
   private logStatus(message: string): void {
+    if (message.includes('Cloud eval: stop requested by keypress')) {
+      this.stripLeadingStopKeyOnNextMovePrompt = true;
+    }
     const formatted = `Status: ${message}`;
     this.logLine(formatted);
   }

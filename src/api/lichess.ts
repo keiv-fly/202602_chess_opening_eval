@@ -43,6 +43,7 @@ type LichessDatabaseCachePayload = {
 };
 
 type LichessUserGame = {
+  id?: string;
   createdAt?: number;
   moves?: string;
   variant?: string;
@@ -738,7 +739,7 @@ export class LichessClient {
           onBefore429Retry: (attempt) => this.handleCloudEval429Retry(attempt, retryPromptContext),
           onWaitFor429Retry: (attempt) => this.waitForCloudEvalRetryWaitInput(attempt, retryPromptContext),
           max429Retries: LICHESS_CLOUD_EVAL_MAX_429_RETRIES,
-          retryWarningSuffix: ' Press "s" to stop retries while waiting.',
+          retryWarningSuffix: ' Press "s" to stop Lichess retries only (Chess.com downloads continue).',
         });
       } catch (error: unknown) {
         if (error instanceof Error && error.message.includes('Lichess API error 404')) {
@@ -749,7 +750,9 @@ export class LichessClient {
             retryPromptContext.enabled = true;
             retryPromptContext.choice = 'use-cached-values';
           }
-          this.onNetworkStatus('Cloud eval: retries exhausted; stopping further eval downloads for this position.');
+          this.onNetworkStatus(
+            'Cloud eval: retries exhausted; stopping further Lichess eval downloads for this position (Chess.com continues).',
+          );
           return null;
         }
         throw error;
@@ -815,7 +818,7 @@ export class LichessClient {
           retryPromptContext.choice = 'use-cached-values';
         }
         this.onNetworkStatus(
-          `Cloud eval: stop requested by keypress; skipped remaining retries for ${attempt.requestDescription}`,
+          `Cloud eval: stop requested by keypress; skipped remaining Lichess retries for ${attempt.requestDescription} (Chess.com downloads continue).`,
         );
         finish('stop');
       };
@@ -843,6 +846,8 @@ export class LichessClient {
     this.onNetworkStatus(`Lichess user dump: start ${user} -> ${cachePaths.dataDirectory}`);
     const monthlyWriters = new Map<string, WriteStream>();
     const monthlyGameCounts = await this.loadMonthlyGameCounts(cachePaths);
+    const monthlySeenGameKeys = await this.loadMonthlySeenGameKeys(cachePaths.dataDirectory);
+    this.syncMonthlyGameCountsWithSeenGameKeys(monthlyGameCounts, monthlySeenGameKeys);
     const lastAvailableAt = await this.readLastAvailableAt(cachePaths.lastAvailableAtPath);
     const since = lastAvailableAt === null ? null : lastAvailableAt + 1;
     const expectedTotalGames = await this.getUserTotalGameCount(user);
@@ -913,11 +918,21 @@ export class LichessClient {
               throw new Error('Lichess user dump line missing createdAt; cannot batch user cache by month.');
             }
             const yearMonth = formatYearMonth(createdAt);
+            let seenGameKeys = monthlySeenGameKeys.get(yearMonth);
+            if (!seenGameKeys) {
+              seenGameKeys = new Set<string>();
+              monthlySeenGameKeys.set(yearMonth, seenGameKeys);
+            }
+            const dedupKey = this.userGameDedupKey(game, line);
+            if (seenGameKeys.has(dedupKey)) {
+              return;
+            }
             const writeStartedAt = Date.now();
             await this.writeLineToMonthlyFile(monthlyWriters, cachePaths.dataDirectory, yearMonth, line);
             stepTotals.writeLinesMs += Date.now() - writeStartedAt;
 
-            monthlyGameCounts.set(yearMonth, (monthlyGameCounts.get(yearMonth) ?? 0) + 1);
+            seenGameKeys.add(dedupKey);
+            monthlyGameCounts.set(yearMonth, seenGameKeys.size);
             if (newestCreatedAt === null || createdAt > newestCreatedAt) {
               newestCreatedAt = createdAt;
             }
@@ -1081,6 +1096,86 @@ export class LichessClient {
       return fromCsv;
     }
     return this.countGamesFromMonthlyFiles(cachePaths.dataDirectory);
+  }
+
+  private userGameDedupKey(game: Pick<LichessUserGame, 'id'>, fallbackLine: string): string {
+    const id = typeof game.id === 'string' ? game.id.trim() : '';
+    if (id !== '') {
+      return `id:${id}`;
+    }
+    return `line:${fallbackLine}`;
+  }
+
+  private userGameDedupKeyFromLine(line: string): string {
+    try {
+      const parsed = JSON.parse(line) as { id?: unknown };
+      const id = typeof parsed?.id === 'string' ? parsed.id.trim() : '';
+      if (id !== '') {
+        return `id:${id}`;
+      }
+    } catch {
+      // Keep malformed lines as-is; they are deduped by exact string.
+    }
+    return `line:${line}`;
+  }
+
+  private syncMonthlyGameCountsWithSeenGameKeys(
+    monthlyGameCounts: Map<string, number>,
+    monthlySeenGameKeys: Map<string, Set<string>>,
+  ): void {
+    for (const yearMonth of [...monthlyGameCounts.keys()]) {
+      if (!monthlySeenGameKeys.has(yearMonth)) {
+        monthlyGameCounts.delete(yearMonth);
+      }
+    }
+    for (const [yearMonth, seenGameKeys] of monthlySeenGameKeys.entries()) {
+      monthlyGameCounts.set(yearMonth, seenGameKeys.size);
+    }
+  }
+
+  private async loadMonthlySeenGameKeys(dataDirectory: string): Promise<Map<string, Set<string>>> {
+    const filePaths = await this.listMonthlyDataFiles(dataDirectory);
+    const monthlySeenGameKeys = new Map<string, Set<string>>();
+
+    for (const filePath of filePaths) {
+      const yearMonth = parseYearMonthFromDataFileName(basename(filePath));
+      if (!yearMonth) {
+        continue;
+      }
+
+      const seenGameKeys = new Set<string>();
+      const dedupedLines: string[] = [];
+      let removedDuplicates = false;
+      const fileStream = createReadStream(filePath, { encoding: 'utf8' });
+      const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+      try {
+        for await (const rawLine of rl) {
+          const line = rawLine.trim();
+          if (line === '') {
+            continue;
+          }
+          const dedupKey = this.userGameDedupKeyFromLine(line);
+          if (seenGameKeys.has(dedupKey)) {
+            removedDuplicates = true;
+            continue;
+          }
+          seenGameKeys.add(dedupKey);
+          dedupedLines.push(line);
+        }
+      } finally {
+        rl.close();
+        fileStream.destroy();
+      }
+
+      if (removedDuplicates) {
+        const dedupedText = dedupedLines.length === 0 ? '' : `${dedupedLines.join('\n')}\n`;
+        await writeFile(filePath, dedupedText, 'utf8');
+      }
+
+      monthlySeenGameKeys.set(yearMonth, seenGameKeys);
+    }
+
+    return monthlySeenGameKeys;
   }
 
   private async readMonthlyGameCounts(monthlyGameCountCsvPath: string): Promise<Map<string, number> | null> {

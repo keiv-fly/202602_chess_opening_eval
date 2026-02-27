@@ -10,6 +10,7 @@ const FEN_AFTER_E4_C5 = 'rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq 
 
 const SAMPLE_GAMES = [
   {
+    id: 'sample-1',
     createdAt: Date.UTC(2024, 0, 20),
     moves: 'e2e4 e7e5 g1f3',
     winner: 'white',
@@ -19,6 +20,7 @@ const SAMPLE_GAMES = [
     },
   },
   {
+    id: 'sample-2',
     createdAt: Date.UTC(2024, 1, 2),
     moves: 'd2d4 d7d5 c2c4',
     status: 'draw',
@@ -28,6 +30,7 @@ const SAMPLE_GAMES = [
     },
   },
   {
+    id: 'sample-3',
     createdAt: Date.UTC(2024, 1, 1),
     moves: 'e2e4 c7c5',
     winner: 'black',
@@ -224,6 +227,61 @@ describe('LichessClient', () => {
 
     const lastAvailableAt = await readFile(join(playerDir, 'last_available_at.txt'), 'utf8');
     expect(lastAvailableAt.trim()).toBe(String(SAMPLE_GAMES[1].createdAt));
+
+    const monthlyGameCounts = await readFile(join(playerDir, 'monthly_games.csv'), 'utf8');
+    expect(monthlyGameCounts).toBe('year_month,games\n2024-01,1\n2024-02,1\n');
+  });
+
+  it('deduplicates existing monthly files and skips duplicate incoming games', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-user-dump-dedup-'));
+    tempDirs.push(dataDir);
+
+    const januaryGame = {
+      id: 'jan-1',
+      createdAt: Date.UTC(2024, 0, 20),
+      moves: 'e2e4 e7e5 g1f3',
+      winner: 'white',
+      players: {
+        white: { user: { name: 'me' } },
+        black: { user: { name: 'op1' } },
+      },
+    };
+    const februaryGame = {
+      id: 'feb-1',
+      createdAt: Date.UTC(2024, 1, 2),
+      moves: 'd2d4 d7d5 c2c4',
+      status: 'draw',
+      players: {
+        white: { user: { name: 'me' } },
+        black: { user: { name: 'op2' } },
+      },
+    };
+
+    const playerDir = join(dataDir, 'lichess_player', 'me');
+    const dataPath = join(playerDir, 'data');
+    await mkdir(dataPath, { recursive: true });
+    await writeFile(
+      join(dataPath, '2024-01.ndjson'),
+      `${JSON.stringify(januaryGame)}\n${JSON.stringify(januaryGame)}\n`,
+      'utf8',
+    );
+    await writeFile(join(playerDir, 'last_available_at.txt'), `${januaryGame.createdAt}\n`, 'utf8');
+    await writeFile(join(playerDir, 'monthly_games.csv'), 'year_month,games\n2024-01,2\n', 'utf8');
+
+    const body = `${JSON.stringify(februaryGame)}\n${JSON.stringify(februaryGame)}\n`;
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ count: { all: 2 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(body, { status: 200 }));
+    const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+
+    const stats = await client.getUserMoveStats('me', INITIAL_FEN, 'white');
+    expect(stats).toHaveLength(2);
+
+    const januaryDumpContents = await readFile(join(dataPath, '2024-01.ndjson'), 'utf8');
+    const februaryDumpContents = await readFile(join(dataPath, '2024-02.ndjson'), 'utf8');
+    expect(januaryDumpContents.trim().split('\n')).toHaveLength(1);
+    expect(februaryDumpContents.trim().split('\n')).toHaveLength(1);
 
     const monthlyGameCounts = await readFile(join(playerDir, 'monthly_games.csv'), 'utf8');
     expect(monthlyGameCounts).toBe('year_month,games\n2024-01,1\n2024-02,1\n');
