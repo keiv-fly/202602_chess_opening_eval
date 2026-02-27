@@ -30,9 +30,11 @@ Create a `.env` file in the project root:
 ```env
 LICHESS_USER=your_lichess_username
 CHESSCOM_USER=your_chesscom_username
+LICHESS_API_TOKEN=your_lichess_api_token
 ```
 
 If these are not set, the CLI will ask for the usernames when it starts.
+If `LICHESS_API_TOKEN` is set, Lichess API requests are sent with `Authorization: Bearer <token>`.
 
 ## Run the Program
 

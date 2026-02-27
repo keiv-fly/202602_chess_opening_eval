@@ -7,6 +7,7 @@ type Retry429Options = {
   requestDescription: string;
   onWarning: (message: string) => void;
   onBeforeRetry?: (attempt: Retry429Attempt) => Promise<Retry429Decision> | Retry429Decision;
+  onWait?: (attempt: Retry429Attempt) => Promise<Retry429Decision> | Retry429Decision;
   maxRetries?: number;
   retryWindowMs?: number;
 };
@@ -101,7 +102,14 @@ export async function fetchWith429Retries(
     );
 
     await cancelResponseBody(response);
-    await sleep(waitMs);
+    if (options.onWait) {
+      const waitDecision = await options.onWait(attempt);
+      if (waitDecision === 'stop') {
+        return response;
+      }
+    } else {
+      await sleep(waitMs);
+    }
     retryCount += 1;
   }
 }

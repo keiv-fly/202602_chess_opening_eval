@@ -65,6 +65,9 @@ type RequestOptions = {
   logNetwork?: boolean;
   onResponseOk?: () => void;
   onBefore429Retry?: (attempt: Retry429Attempt) => Promise<Retry429Decision> | Retry429Decision;
+  onWaitFor429Retry?: (attempt: Retry429Attempt) => Promise<Retry429Decision> | Retry429Decision;
+  max429Retries?: number;
+  retryWarningSuffix?: string;
 };
 
 type CloudEvalRetryChoice = 'continue-retries' | 'use-cached-values';
@@ -110,6 +113,7 @@ const LICHESS_EVAL_CACHE_ROOT = 'lichess_eval';
 const LICHESS_EVAL_FEN_DIRECTORY = 'fen';
 const LICHESS_STANDARD_VARIANT = 'standard';
 const LICHESS_STANDARD_PERF_TYPES = 'ultraBullet,bullet,blitz,rapid,classical,correspondence';
+const LICHESS_CLOUD_EVAL_MAX_429_RETRIES = 3;
 
 function sanitizeUserForFileName(user: string): string {
   return user.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -318,6 +322,7 @@ export class LichessClient {
     private readonly onCloudEvalFirstRetryWhenCacheReady: (
       request: CloudEvalRetryPromptRequest,
     ) => Promise<CloudEvalRetryChoice> | CloudEvalRetryChoice = () => 'continue-retries',
+    private readonly apiToken: string | null = (process.env.LICHESS_API_TOKEN ?? '').trim() || null,
   ) {}
 
   async getUserMoveStats(user: string, fen: string, side: Side, sinceTimestampMs: number | null = null): Promise<MoveStats[]> {
@@ -611,6 +616,9 @@ export class LichessClient {
     }
 
     for (const move of moves) {
+      if (retryPromptContext?.choice === 'use-cached-values') {
+        break;
+      }
       if (merged.has(move.san)) {
         continue;
       }
@@ -628,6 +636,10 @@ export class LichessClient {
     san: string,
     retryPromptContext: CloudEvalRetryPromptContext | undefined = undefined,
   ): Promise<MoveEval | undefined> {
+    if (retryPromptContext?.choice === 'use-cached-values') {
+      return undefined;
+    }
+
     const chess = new Chess();
     chess.load(fen);
     const moveResult = chess.move(san, { strict: false });
@@ -639,6 +651,7 @@ export class LichessClient {
     const childResult = await this.getCloudEvalResponse(childFen, retryPromptContext);
     if (childResult) {
       await this.writeCloudEvalResponseForMove(fen, san, childResult.rawResponseText);
+      this.onNetworkStatus(`Status: Lichess cloud-eval move ${san} ok.`);
     }
     const childData = childResult?.data ?? null;
     const childEval = this.getPrimaryCloudEval(childData);
@@ -723,21 +736,105 @@ export class LichessClient {
         return await this.requestJsonWithRaw<LichessCloudEvalResponse>(url, {
           logNetwork: false,
           onBefore429Retry: (attempt) => this.handleCloudEval429Retry(attempt, retryPromptContext),
+          onWaitFor429Retry: (attempt) => this.waitForCloudEvalRetryWaitInput(attempt, retryPromptContext),
+          max429Retries: LICHESS_CLOUD_EVAL_MAX_429_RETRIES,
+          retryWarningSuffix: ' Press "s" to stop retries while waiting.',
         });
       } catch (error: unknown) {
         if (error instanceof Error && error.message.includes('Lichess API error 404')) {
           return null;
         }
-        if (
-          retryPromptContext?.enabled &&
-          retryPromptContext.choice === 'use-cached-values' &&
-          error instanceof Error &&
-          error.message.includes('Lichess API error 429')
-        ) {
+        if (error instanceof Error && error.message.includes('Lichess API error 429')) {
+          if (retryPromptContext) {
+            retryPromptContext.enabled = true;
+            retryPromptContext.choice = 'use-cached-values';
+          }
+          this.onNetworkStatus('Cloud eval: retries exhausted; stopping further eval downloads for this position.');
           return null;
         }
         throw error;
       }
+    });
+  }
+
+  private async waitForCloudEvalRetryWaitInput(
+    attempt: Retry429Attempt,
+    retryPromptContext: CloudEvalRetryPromptContext | undefined,
+  ): Promise<Retry429Decision> {
+    const waitMs = Math.max(0, attempt.waitMs);
+    if (waitMs === 0) {
+      return 'retry';
+    }
+
+    const stdin = process.stdin;
+    if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+      return retryPromptContext?.choice === 'use-cached-values' ? 'stop' : 'retry';
+    }
+
+    const wasRawMode = stdin.isRaw === true;
+    const wasPaused = stdin.isPaused();
+    return new Promise<Retry429Decision>((resolve) => {
+      let finished = false;
+      const timer = setTimeout(() => {
+        finish('retry');
+      }, waitMs);
+
+      const finish = (decision: Retry429Decision): void => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        clearTimeout(timer);
+        stdin.off('data', onData);
+        if (!wasRawMode) {
+          try {
+            stdin.setRawMode(false);
+          } catch {
+            // Ignore raw-mode reset failures and continue shutdown.
+          }
+        }
+        if (wasPaused) {
+          stdin.pause();
+        }
+        resolve(decision);
+      };
+
+      const onData = (chunk: Buffer | string): void => {
+        const key = (typeof chunk === 'string' ? chunk : chunk.toString('utf8')).toLowerCase();
+        if (key.includes('\u0003')) {
+          finish('stop');
+          process.kill(process.pid, 'SIGINT');
+          return;
+        }
+        if (!key.includes('s')) {
+          return;
+        }
+        if (retryPromptContext) {
+          retryPromptContext.enabled = true;
+          retryPromptContext.choice = 'use-cached-values';
+        }
+        this.onNetworkStatus(
+          `Cloud eval: stop requested by keypress; skipped remaining retries for ${attempt.requestDescription}`,
+        );
+        finish('stop');
+      };
+
+      if (!wasRawMode) {
+        try {
+          stdin.setRawMode(true);
+        } catch {
+          stdin.off('data', onData);
+          clearTimeout(timer);
+          if (wasPaused) {
+            stdin.pause();
+          }
+          resolve('retry');
+          return;
+        }
+      }
+      stdin.on('data', onData);
+      stdin.resume();
     });
   }
 
@@ -1088,15 +1185,14 @@ export class LichessClient {
       const response = await fetchWith429Retries(
         () =>
           this.fetchImpl(url, {
-            headers: {
-              Accept: 'application/json',
-              'Accept-Encoding': 'gzip, br',
-            },
+            headers: this.requestHeaders(url, 'application/json'),
           }),
         {
           requestDescription: `GET ${fullUrl}`,
-          onWarning: (message) => this.onNetworkStatus(message),
+          onWarning: (message) => this.onNetworkStatus(`${message}${options.retryWarningSuffix ?? ''}`),
           onBeforeRetry: options.onBefore429Retry,
+          onWait: options.onWaitFor429Retry,
+          maxRetries: options.max429Retries,
         },
       );
 
@@ -1147,15 +1243,14 @@ export class LichessClient {
       const response = await fetchWith429Retries(
         () =>
           this.fetchImpl(url, {
-            headers: {
-              Accept: 'application/x-ndjson',
-              'Accept-Encoding': 'gzip, br',
-            },
+            headers: this.requestHeaders(url, 'application/x-ndjson'),
           }),
         {
           requestDescription: `GET ${fullUrl}`,
-          onWarning: (message) => this.onNetworkStatus(message),
+          onWarning: (message) => this.onNetworkStatus(`${message}${options.retryWarningSuffix ?? ''}`),
           onBeforeRetry: options.onBefore429Retry,
+          onWait: options.onWaitFor429Retry,
+          maxRetries: options.max429Retries,
         },
       );
       const requestPageMs = Date.now() - requestPageStartedAt;
@@ -1280,6 +1375,21 @@ export class LichessClient {
       this.onNetworkStatus(`Network: GET ${fullUrl} parse failed; received body:\n${body}`);
       throw new Error(`Failed to parse JSON from ${fullUrl}: ${parseMessage}\nReceived body:\n${body}`);
     }
+  }
+
+  private requestHeaders(url: URL, accept: string): Record<string, string> {
+    const headers: Record<string, string> = {
+      Accept: accept,
+      'Accept-Encoding': 'gzip, br',
+    };
+    if (this.apiToken && this.isLichessApiHost(url)) {
+      headers.Authorization = `Bearer ${this.apiToken}`;
+    }
+    return headers;
+  }
+
+  private isLichessApiHost(url: URL): boolean {
+    return /(^|\.)lichess\.org$/iu.test(url.hostname);
   }
 
   private parseUserGameLine(line: string, source: string): LichessUserGame {
