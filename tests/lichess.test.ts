@@ -190,6 +190,33 @@ describe('LichessClient', () => {
     expect(monthlyGameCounts).toBe('year_month,games\n2024-01,1\n2024-02,1\n');
   });
 
+  it('reads downloaded user games without network calls', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-downloaded-only-'));
+    tempDirs.push(dataDir);
+    const userDataDir = join(dataDir, 'lichess_player', 'me', 'data');
+    await mkdir(userDataDir, { recursive: true });
+    await writeFile(join(userDataDir, '2024-01.ndjson'), `${JSON.stringify(SAMPLE_GAMES[0])}\n`, 'utf8');
+    await writeFile(join(userDataDir, '2024-02.ndjson'), `${JSON.stringify(SAMPLE_GAMES[1])}\n`, 'utf8');
+
+    const fetchImpl = vi.fn();
+    const client = new LichessClient(
+      fetchImpl as unknown as typeof fetch,
+      'https://explorer.lichess.ovh',
+      () => {},
+      () => {},
+      'https://lichess.org',
+      dataDir,
+    );
+
+    const stats = await client.getUserMoveStatsFromDownloadedGames('me', INITIAL_FEN, 'white');
+
+    expect(stats).toEqual([
+      { san: 'd4', white: 0, draws: 1, black: 0, total: 1 },
+      { san: 'e4', white: 1, draws: 0, black: 0, total: 1 },
+    ]);
+    expect(fetchImpl).toHaveBeenCalledTimes(0);
+  });
+
   it('filters user move stats by a since timestamp', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'lichess-user-filtered-'));
     tempDirs.push(dataDir);

@@ -26,6 +26,7 @@ const CSV_COLUMNS = [
   'move_eval_cp',
   'move_eval_mate',
   'move_eval_depth',
+  'move_pot',
   ...SOURCE_PREFIXES.flatMap((prefix) => SOURCE_SUFFIXES.map((suffix) => `${prefix}_${suffix}`)),
 ] as const;
 
@@ -78,6 +79,49 @@ function evalToString(evalValue?: MoveEval): string {
   return `nan${depthSuffix}|--.-`;
 }
 
+function whiteScoreRate(stats: MoveStats | undefined): number | undefined {
+  if (!stats || stats.total <= 0) return undefined;
+  return (stats.white + stats.draws / 2) / stats.total;
+}
+
+function evalWhiteWinRate(evalValue: MoveEval | undefined): number | undefined {
+  if (!evalValue || evalValue.cp === undefined) return undefined;
+  return 1 / (1 + Math.exp(-LICHESS_CP_TO_WIN_PROBABILITY_K * evalValue.cp));
+}
+
+function calculateMovePotential(
+  row: CombinedMoveRow,
+  sourceTotals: { lichessUser: number; chessComUser: number },
+): number {
+  const lichessUserWins = row.lichessUser?.white ?? 0;
+  const chessComWins = row.chessComUser?.white ?? 0;
+  const lichessUserDraws = row.lichessUser?.draws ?? 0;
+  const chessComDraws = row.chessComUser?.draws ?? 0;
+  const lichessUserTotal = row.lichessUser?.total ?? 0;
+  const chessComUserTotal = row.chessComUser?.total ?? 0;
+
+  const moveCombinedTotal = lichessUserTotal + chessComUserTotal;
+  const actualScoreRate =
+    moveCombinedTotal > 0
+      ? (lichessUserWins + lichessUserDraws / 2 + chessComWins + chessComDraws / 2) / moveCombinedTotal
+      : 0;
+
+  const dbGames = row.lichessDb?.total ?? 0;
+  const dbScoreRate = whiteScoreRate(row.lichessDb);
+  const evalScoreRate = evalWhiteWinRate(row.eval);
+  const baseScoreRate = dbGames >= 20 ? dbScoreRate : evalScoreRate ?? dbScoreRate;
+
+  const allUserGames = sourceTotals.lichessUser + sourceTotals.chessComUser;
+  const moveShare = allUserGames > 0 ? moveCombinedTotal / allUserGames : 0;
+
+  return (actualScoreRate - (baseScoreRate ?? 0) * moveShare) * 100;
+}
+
+function formatMovePotential(value: number): string {
+  const normalized = Math.abs(value) < 0.05 ? 0 : value;
+  return normalized.toFixed(1);
+}
+
 function formatMoveCount(total: number, abbreviateThousands: boolean): string {
   if (!abbreviateThousands) {
     return String(total);
@@ -122,13 +166,19 @@ export function renderStatsTable(rows: CombinedMoveRow[]): string {
   const lichessUserTotal = rows.reduce((sum, row) => sum + (row.lichessUser?.total ?? 0), 0);
   const chessComTotal = rows.reduce((sum, row) => sum + (row.chessComUser?.total ?? 0), 0);
   const lichessDbTotal = rows.reduce((sum, row) => sum + (row.lichessDb?.total ?? 0), 0);
+  const sourceTotals = {
+    lichessUser: lichessUserTotal,
+    chessComUser: chessComTotal,
+  };
 
   const evalStrings = rows.map((row) => evalToString(row.eval));
   const evalWidth = Math.max(3, ...evalStrings.map((value) => value.length));
+  const potStrings = rows.map((row) => formatMovePotential(calculateMovePotential(row, sourceTotals)));
+  const potWidth = Math.max('Pot.'.length, ...potStrings.map((value) => value.length));
 
   const table = new Table({
-    head: ['Move', 'Eval', 'Lichess user', 'Chess.com user', 'Lichess DB'],
-    colAligns: ['left', 'right', 'left', 'left', 'left'],
+    head: ['Move', 'Eval', 'Lichess user', 'Chess.com user', 'Lichess DB', 'Pot.'],
+    colAligns: ['left', 'right', 'left', 'left', 'left', 'right'],
     wordWrap: true,
   });
 
@@ -139,6 +189,7 @@ export function renderStatsTable(rows: CombinedMoveRow[]): string {
       statsToString(row.lichessUser, luWidth, lichessUserTotal, false),
       statsToString(row.chessComUser, ccWidth, chessComTotal, false),
       statsToString(row.lichessDb, dbWidth, lichessDbTotal, useThousandsForLichessDb),
+      potStrings[index].padStart(potWidth, ' '),
     ]);
   }
 
@@ -201,6 +252,7 @@ export function renderStatsCsv(rows: CombinedMoveRow[], context: CsvExportContex
       move_eval_cp: row.eval?.cp ?? '',
       move_eval_mate: row.eval?.mate ?? '',
       move_eval_depth: row.eval?.depth ?? '',
+      move_pot: toOneDecimal(calculateMovePotential(row, sourceTotals)),
     };
 
     addSourceColumns(record, 'source_lichess_user', row.lichessUser, sourceTotals.lichessUser);

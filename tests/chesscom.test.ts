@@ -1,4 +1,4 @@
-import { readFile, rm, mkdtemp } from 'node:fs/promises';
+import { mkdir, readFile, rm, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -156,6 +156,22 @@ describe('ChessComClient', () => {
 
     expect(progressEvents[0]).toEqual({ loaded: 0, total: 2, done: false });
     expect(progressEvents[progressEvents.length - 1]).toEqual({ loaded: 2, total: 2, done: true });
+  });
+
+  it('reads downloaded games without network calls', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'chesscom-downloaded-only-'));
+    tempDirs.push(dataDir);
+    const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const userDataDir = join(dataDir, 'chess_com_player', 'me', 'data');
+    await mkdir(userDataDir, { recursive: true });
+    await writeFile(join(userDataDir, '2024-01.ndjson'), `${JSON.stringify(GAMES[0])}\n${JSON.stringify(GAMES[1])}\n`, 'utf8');
+
+    const fetchImpl = vi.fn();
+    const client = new ChessComClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, dataDir);
+    const stats = await client.getUserMoveStatsFromDownloadedGames('me', initialFen, 'white');
+
+    expect(stats).toEqual([{ san: 'e4', white: 1, draws: 0, black: 1, total: 2 }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(0);
   });
 
   it('filters user move stats by a since timestamp', async () => {

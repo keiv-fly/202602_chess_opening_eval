@@ -32,6 +32,7 @@ describe('evaluator', () => {
     expect(table).toContain('10/100% 60.0/20.0/20.0|70.0');
     expect(table).toContain('8/100% 62.5/12.5/25.0|68.8');
     expect(table).toContain('100/100% 50.0/20.0/30.0|60.0');
+    expect(table).toContain('9.4');
   });
 
   it('renders 100 percent without decimals and keeps alignment width', () => {
@@ -96,6 +97,7 @@ describe('evaluator', () => {
 
     expect(header).toContain('position_fen');
     expect(header).toContain('move_san');
+    expect(header).toContain('move_pot');
     expect(header).toContain('source_lichess_user_white_count');
     expect(header).toContain('source_chesscom_user_draw_percent');
     expect(header).toContain('source_lichess_db_black_percent');
@@ -104,5 +106,44 @@ describe('evaluator', () => {
     expect(firstDataRow).toContain(',10,100,6,2,2,60,20,20,');
     expect(firstDataRow).toContain(',8,100,5,1,2,62.5,12.5,25,');
     expect(firstDataRow).toContain(',100,100,50,20,30,50,20,30');
+  });
+
+  it('uses eval win percent for move_pot when db sample is under 20 games', () => {
+    const csv = renderStatsCsv(
+      [
+        {
+          san: 'e4',
+          eval: { cp: 0, depth: 20 },
+          lichessUser: { san: 'e4', total: 10, white: 10, draws: 0, black: 0 },
+          chessComUser: { san: 'e4', total: 0, white: 0, draws: 0, black: 0 },
+          lichessDb: { san: 'e4', total: 10, white: 0, draws: 0, black: 10 },
+        },
+      ],
+      {
+        fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        side: 'white',
+      },
+    );
+
+    const [headerLine, dataLine] = csv.split('\n');
+    const headers = headerLine.split(',');
+    const data = dataLine.split(',');
+    const movePotIndex = headers.indexOf('move_pot');
+    expect(movePotIndex).toBeGreaterThanOrEqual(0);
+    expect(data[movePotIndex]).toBe('50');
+  });
+
+  it('calculates move_pot using white wins and draws/2', () => {
+    const table = renderStatsTable([
+      {
+        san: '...c5',
+        eval: { cp: -15, depth: 20 },
+        lichessUser: { san: '...c5', total: 4, white: 1, draws: 1, black: 2 },
+        chessComUser: { san: '...c5', total: 6, white: 2, draws: 2, black: 2 },
+        lichessDb: { san: '...c5', total: 30, white: 9, draws: 6, black: 15 },
+      },
+    ]);
+
+    expect(table).toContain('5.0');
   });
 });

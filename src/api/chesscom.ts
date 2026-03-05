@@ -258,6 +258,17 @@ export class ChessComClient {
     return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, username, normalizedFen, side, sinceTimestampMs);
   }
 
+  async getUserMoveStatsFromDownloadedGames(
+    username: string,
+    fen: string,
+    side: Side,
+    sinceTimestampMs: number | null = null,
+  ): Promise<MoveStats[]> {
+    const cachePaths = this.userCachePaths(username);
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, username, normalizedFen, side, sinceTimestampMs);
+  }
+
   private async ensureUserGamesCache(username: string): Promise<UserCachePaths> {
     const userKey = username.toLowerCase();
     const cachePaths = this.userCachePaths(username);

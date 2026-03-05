@@ -370,6 +370,17 @@ export class LichessClient {
     return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, normalizedFen, side, sinceTimestampMs);
   }
 
+  async getUserMoveStatsFromDownloadedGames(
+    user: string,
+    fen: string,
+    side: Side,
+    sinceTimestampMs: number | null = null,
+  ): Promise<MoveStats[]> {
+    const cachePaths = this.userCachePaths(user);
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, normalizedFen, side, sinceTimestampMs);
+  }
+
   async getDatabaseMoveStats(fen: string): Promise<Array<MoveStats & { eval?: MoveEval }>> {
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
     const cachePath = this.databaseCachePathForFen(normalizedFen);

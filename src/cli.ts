@@ -54,6 +54,7 @@ class App {
   private chessComDumpProgress: cliProgress.SingleBar | null = null;
   private chessComDumpProgressTotal = 0;
   private stripLeadingStopKeyOnNextMovePrompt = false;
+  private hasFetchedUserGamesForSession = false;
 
   async run(): Promise<void> {
     const rl = readline.createInterface({ input, output });
@@ -64,6 +65,7 @@ class App {
     const baseFen = initialPosition.baseFen;
     this.history.length = 0;
     this.history.push(...initialPosition.initialHistory);
+    this.hasFetchedUserGamesForSession = false;
     let fen = initialPosition.currentFen;
     const sideInput = (await rl.question('Side (white/black or w/b): ')).trim().toLowerCase();
     let side: Side;
@@ -150,24 +152,52 @@ class App {
     const lichessUserKey = `lichess-user:${lichessUser}:${side}:${timeFilter.cacheKey}:${normalizedFen}`;
     const lichessDbKey = `lichess-db:${normalizedFen}`;
     const chessComKey = `chesscom:${chessComUser}:${side}:${timeFilter.cacheKey}:${normalizedFen}`;
+    const useDownloadedGamesOnly = this.hasFetchedUserGamesForSession;
 
-    this.logLine('Status: Lichess user request started');
-    const lichessUserStats = await this.cache.getOrSet(lichessUserKey, () =>
-      this.lichessClient.getUserMoveStats(lichessUser, normalizedFen, side, timeFilter.sinceTimestampMs),
+    this.logLine(
+      useDownloadedGamesOnly
+        ? 'Status: User games mode -> local downloaded games only (no Lichess/Chess.com user-site requests)'
+        : 'Status: User games mode -> first position sync from sites, then local downloaded games',
     );
-    this.logLine('Status: Lichess user request finished');
+
+    this.logLine(
+      useDownloadedGamesOnly ? 'Status: Lichess user local read started' : 'Status: Lichess user request started',
+    );
+    const lichessUserStats = await this.cache.getOrSet(lichessUserKey, () =>
+      useDownloadedGamesOnly
+        ? this.lichessClient.getUserMoveStatsFromDownloadedGames(lichessUser, normalizedFen, side, timeFilter.sinceTimestampMs)
+        : this.lichessClient.getUserMoveStats(lichessUser, normalizedFen, side, timeFilter.sinceTimestampMs),
+    );
+    this.logLine(
+      useDownloadedGamesOnly ? 'Status: Lichess user local read finished' : 'Status: Lichess user request finished',
+    );
 
     this.logLine('Status: Lichess DB request started');
     const lichessDbPromise = this.cache.getOrSet(lichessDbKey, () => this.lichessClient.getDatabaseMoveStats(normalizedFen));
 
-    this.logLine('Status: Chess.com user request started');
+    this.logLine(
+      useDownloadedGamesOnly ? 'Status: Chess.com user local read started' : 'Status: Chess.com user request started',
+    );
     const chessComPromise = this.cache.getOrSet(chessComKey, () =>
-      this.chessComClient.getUserMoveStats(chessComUser, normalizedFen, side, timeFilter.sinceTimestampMs),
+      useDownloadedGamesOnly
+        ? this.chessComClient.getUserMoveStatsFromDownloadedGames(
+            chessComUser,
+            normalizedFen,
+            side,
+            timeFilter.sinceTimestampMs,
+          )
+        : this.chessComClient.getUserMoveStats(chessComUser, normalizedFen, side, timeFilter.sinceTimestampMs),
     );
 
     const [lichessDbStats, chessComStats] = await Promise.all([lichessDbPromise, chessComPromise]);
     this.logLine('Status: Lichess DB request finished');
-    this.logLine('Status: Chess.com user request finished');
+    this.logLine(
+      useDownloadedGamesOnly ? 'Status: Chess.com user local read finished' : 'Status: Chess.com user request finished',
+    );
+    if (!useDownloadedGamesOnly) {
+      this.hasFetchedUserGamesForSession = true;
+      this.logLine('Status: User games cache primed for this session; next positions use local files only.');
+    }
 
     this.logSourceTotals(lichessUserStats, chessComStats, lichessDbStats);
 
@@ -257,7 +287,12 @@ class App {
     const chess = new Chess();
     chess.load(baseFen);
     for (const move of history) {
-      const result = chess.move(move, { strict: false });
+      let result: ReturnType<Chess['move']>;
+      try {
+        result = chess.move(move, { strict: false });
+      } catch {
+        return null;
+      }
       if (!result) {
         return null;
       }
