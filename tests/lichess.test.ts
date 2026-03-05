@@ -6,6 +6,7 @@ import { LichessClient, moveStatsFromLichessGames } from '../src/api/lichess.js'
 import { normalizeFenWithoutMoveCounters } from '../src/fen.js';
 
 const INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const INITIAL_FEN_FOUR_FIELD = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -';
 const FEN_AFTER_E4_C5 = 'rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
 
 const SAMPLE_GAMES = [
@@ -386,12 +387,20 @@ describe('LichessClient', () => {
       dataDir,
     );
     const evalLookupSpy = vi
-      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
-      .mockImplementation(async (fen: string) => {
-        if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
-          return localEvalResponse(25, { moves: 'e2e4 e7e5', cp: 30 });
+      .spyOn(
+        client as unknown as { queryEvalForFensFromSource: (fens: string[]) => Promise<Map<string, unknown>> },
+        'queryEvalForFensFromSource',
+      )
+      .mockImplementation(async (fens: string[]) => {
+        const responses = new Map<string, unknown>();
+        for (const fen of fens) {
+          if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
+            responses.set(fen, localEvalResponse(25, { moves: 'e2e4 e7e5', cp: 30 }));
+          } else {
+            responses.set(fen, null);
+          }
         }
-        return null;
+        return responses;
       });
 
     const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 23 19';
@@ -419,6 +428,50 @@ describe('LichessClient', () => {
     expect(evalText).toContain('"depth":25');
     expect(evalText).toContain('"moves":"e2e4 e7e5"');
     expect(evalText).not.toContain('"source"');
+  });
+
+  it('falls back to 4-field FEN for local eval lookup', async () => {
+    const queryFens = vi.fn().mockResolvedValue([
+      {
+        fen: INITIAL_FEN,
+        eval: null,
+        mate: null,
+        depth: null,
+        first_move: null,
+        error: null,
+      },
+      {
+        fen: INITIAL_FEN_FOUR_FIELD,
+        eval: 19,
+        mate: null,
+        depth: 65,
+        first_move: 'c2c4',
+        error: null,
+      },
+    ]);
+    const mockService = {
+      init: vi.fn(),
+      queryFens,
+    };
+    const client = new LichessClient(vi.fn() as unknown as typeof fetch, undefined, () => {}, () => {});
+    vi.spyOn(
+      client as unknown as { getRocksdbEvalService: () => Promise<unknown> },
+      'getRocksdbEvalService',
+    ).mockResolvedValue(mockService as unknown as Promise<unknown>);
+
+    const result = await (
+      client as unknown as {
+        queryEvalForFenFromSource: (fen: string) => Promise<{
+          data: { depth?: number; pvs?: Array<{ moves?: string; cp?: number; mate?: number }> };
+          rawResponseText: string;
+        } | null>;
+      }
+    ).queryEvalForFenFromSource(INITIAL_FEN);
+
+    expect(queryFens).toHaveBeenCalledTimes(1);
+    expect(queryFens).toHaveBeenCalledWith([INITIAL_FEN, INITIAL_FEN_FOUR_FIELD]);
+    expect(result?.data.depth).toBe(65);
+    expect(result?.data.pvs?.[0]).toEqual({ moves: 'c2c4', cp: 19, mate: undefined });
   });
 
   it('sends bearer auth when querying explorer.lichess.ovh', async () => {
@@ -471,12 +524,20 @@ describe('LichessClient', () => {
     const fetchImpl = vi.fn();
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
     const evalLookupSpy = vi
-      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
-      .mockImplementation(async (fen: string) => {
-        if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
-          return localEvalResponse(31, { moves: 'e7e5', cp: -42 });
+      .spyOn(
+        client as unknown as { queryEvalForFensFromSource: (fens: string[]) => Promise<Map<string, unknown>> },
+        'queryEvalForFensFromSource',
+      )
+      .mockImplementation(async (fens: string[]) => {
+        const responses = new Map<string, unknown>();
+        for (const fen of fens) {
+          if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
+            responses.set(fen, localEvalResponse(31, { moves: 'e7e5', cp: -42 }));
+          } else {
+            responses.set(fen, null);
+          }
         }
-        return null;
+        return responses;
       });
     const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
@@ -515,8 +576,17 @@ describe('LichessClient', () => {
     );
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
     const evalLookupSpy = vi
-      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
-      .mockResolvedValue(localEvalResponse(26, { moves: 'e7e5 g1f3', cp: 40 }));
+      .spyOn(
+        client as unknown as { queryEvalForFensFromSource: (fens: string[]) => Promise<Map<string, unknown>> },
+        'queryEvalForFensFromSource',
+      )
+      .mockImplementation(async (fens: string[]) => {
+        const responses = new Map<string, unknown>();
+        for (const fen of fens) {
+          responses.set(fen, localEvalResponse(26, { moves: 'e7e5 g1f3', cp: 40 }));
+        }
+        return responses;
+      });
 
     const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
     const db = await client.getDatabaseMoveStats(fen);
@@ -541,15 +611,24 @@ describe('LichessClient', () => {
     );
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
     const evalLookupSpy = vi
-      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
-      .mockImplementation(async (fen: string) => {
-        if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
-          return localEvalResponse(25, { moves: 'e2e4 e7e5', cp: 30 });
+      .spyOn(
+        client as unknown as { queryEvalForFensFromSource: (fens: string[]) => Promise<Map<string, unknown>> },
+        'queryEvalForFensFromSource',
+      )
+      .mockImplementation(async (fens: string[]) => {
+        const responses = new Map<string, unknown>();
+        for (const fen of fens) {
+          if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
+            responses.set(fen, localEvalResponse(25, { moves: 'e2e4 e7e5', cp: 30 }));
+            continue;
+          }
+          if (fen === 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1') {
+            responses.set(fen, localEvalResponse(20, { moves: 'd7d5', cp: 12 }));
+            continue;
+          }
+          responses.set(fen, null);
         }
-        if (fen === 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1') {
-          return localEvalResponse(20, { moves: 'd7d5', cp: 12 });
-        }
-        return null;
+        return responses;
       });
 
     const db = await client.getDatabaseMoveStats(INITIAL_FEN);
@@ -558,7 +637,7 @@ describe('LichessClient', () => {
     expect(db.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
     expect(cachedDb.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(evalLookupSpy).toHaveBeenCalledTimes(2);
+    expect(evalLookupSpy).toHaveBeenCalledTimes(1);
 
     const childEvalPath = join(dataDir, 'lichess_eval', 'fen', encodeURIComponent(INITIAL_FEN), encodeURIComponent('d4'));
     const childEvalText = await readFile(childEvalPath, 'utf8');
@@ -573,12 +652,20 @@ describe('LichessClient', () => {
     const fetchImpl = vi.fn();
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
     const evalLookupSpy = vi
-      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
-      .mockImplementation(async (fen: string) => {
-        if (fen === 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1') {
-          return localEvalResponse(20, { moves: 'd7d5', cp: 12 });
+      .spyOn(
+        client as unknown as { queryEvalForFensFromSource: (fens: string[]) => Promise<Map<string, unknown>> },
+        'queryEvalForFensFromSource',
+      )
+      .mockImplementation(async (fens: string[]) => {
+        const responses = new Map<string, unknown>();
+        for (const fen of fens) {
+          if (fen === 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1') {
+            responses.set(fen, localEvalResponse(20, { moves: 'd7d5', cp: 12 }));
+          } else {
+            responses.set(fen, null);
+          }
         }
-        return null;
+        return responses;
       });
     const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
@@ -627,8 +714,17 @@ describe('LichessClient', () => {
       onCloudEvalFirstRetryWhenCacheReady,
     );
     const evalLookupSpy = vi
-      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
-      .mockResolvedValue(null);
+      .spyOn(
+        client as unknown as { queryEvalForFensFromSource: (fens: string[]) => Promise<Map<string, unknown>> },
+        'queryEvalForFensFromSource',
+      )
+      .mockImplementation(async (fens: string[]) => {
+        const responses = new Map<string, unknown>();
+        for (const fen of fens) {
+          responses.set(fen, null);
+        }
+        return responses;
+      });
     const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
     await mkdir(join(dataDir, 'lichess_database', 'fen'), { recursive: true });

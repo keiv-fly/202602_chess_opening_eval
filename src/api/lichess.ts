@@ -151,6 +151,26 @@ function isMissingFileError(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
+function toFourFieldFen(fen: string): string {
+  const normalizedWhitespaceFen = fen.trim().replace(/\s+/g, ' ');
+  const [board, side, castling = '-', enPassant = '-'] = normalizedWhitespaceFen.split(' ');
+  if (!board || !side) {
+    return normalizedWhitespaceFen;
+  }
+  return `${board} ${side} ${castling} ${enPassant}`;
+}
+
+function hasRocksdbEval(row: RocksdbEvalQueryRow): boolean {
+  return (
+    (typeof row.eval === 'number' && Number.isFinite(row.eval)) ||
+    (typeof row.mate === 'number' && Number.isFinite(row.mate))
+  );
+}
+
+function rowDepthOrNegativeInfinity(row: RocksdbEvalQueryRow): number {
+  return row.depth ?? Number.NEGATIVE_INFINITY;
+}
+
 function gameOutcome(game: LichessUserGame): 'white' | 'black' | 'draw' | null {
   if (game.winner === 'white' || game.winner === 'black') {
     return game.winner;
@@ -542,6 +562,7 @@ export class LichessClient {
       return;
     }
 
+    const missingFileMoves: Array<{ san: string; childFen: string }> = [];
     for (const move of moves) {
       const san = move.san;
       if (!cloudEvalsBySan.has(san)) {
@@ -551,10 +572,32 @@ export class LichessClient {
       if (await this.isRealCloudEvalApiFile(path)) {
         continue;
       }
-      await this.getCloudEvalForMove(baseFen, san, retryPromptContext);
+      const childFen = this.childFenAfterMove(baseFen, san);
+      if (!childFen) {
+        continue;
+      }
+      missingFileMoves.push({ san, childFen });
+    }
+
+    if (missingFileMoves.length === 0) {
+      return;
+    }
+
+    const childResultsByFen = await this.getCloudEvalResponsesForFens(
+      missingFileMoves.map((move) => move.childFen),
+      retryPromptContext,
+    );
+
+    for (const move of missingFileMoves) {
       if (retryPromptContext.enabled && retryPromptContext.choice === 'use-cached-values') {
         return;
       }
+      const childResult = childResultsByFen.get(move.childFen) ?? null;
+      if (!childResult) {
+        continue;
+      }
+      await this.writeCloudEvalResponseForMove(baseFen, move.san, childResult.rawResponseText);
+      this.onNetworkStatus(`Status: Lichess local-eval move ${move.san} ok.`);
     }
   }
 
@@ -634,6 +677,7 @@ export class LichessClient {
       merged.set(san, evalValue);
     }
 
+    const missingMoves: Array<{ san: string; childFen: string }> = [];
     for (const move of moves) {
       if (retryPromptContext?.choice === 'use-cached-values') {
         break;
@@ -641,13 +685,55 @@ export class LichessClient {
       if (merged.has(move.san)) {
         continue;
       }
-      const evalAfterMove = await this.getCloudEvalForMove(fen, move.san, retryPromptContext);
-      if (evalAfterMove) {
-        merged.set(move.san, evalAfterMove);
+      const childFen = this.childFenAfterMove(fen, move.san);
+      if (!childFen) {
+        continue;
+      }
+      missingMoves.push({ san: move.san, childFen });
+    }
+
+    if (missingMoves.length === 0) {
+      return merged;
+    }
+
+    const childResultsByFen = await this.getCloudEvalResponsesForFens(
+      missingMoves.map((move) => move.childFen),
+      retryPromptContext,
+    );
+    for (const move of missingMoves) {
+      const childResult = childResultsByFen.get(move.childFen) ?? null;
+      if (childResult) {
+        await this.writeCloudEvalResponseForMove(fen, move.san, childResult.rawResponseText);
+        this.onNetworkStatus(`Status: Lichess local-eval move ${move.san} ok.`);
+      }
+      const childData = childResult?.data ?? null;
+      const childEval = this.getPrimaryCloudEval(childData);
+      if (childEval) {
+        merged.set(move.san, childEval);
       }
     }
 
     return merged;
+  }
+
+  private childFenAfterMove(baseFen: string, san: string): string | null {
+    const chess = new Chess();
+    chess.load(baseFen);
+    const moveResult = chess.move(san, { strict: false });
+    if (!moveResult) {
+      return null;
+    }
+    return normalizeFenWithoutMoveCounters(chess.fen());
+  }
+
+  private async getCloudEvalResponsesForFens(
+    fens: string[],
+    retryPromptContext: CloudEvalRetryPromptContext | undefined = undefined,
+  ): Promise<Map<string, LichessCloudEvalResponseResult | null>> {
+    if (retryPromptContext?.enabled && retryPromptContext.choice === 'use-cached-values') {
+      return new Map(fens.map((fen) => [normalizeFenWithoutMoveCounters(fen), null]));
+    }
+    return this.queryEvalForFensFromSource(fens);
   }
 
   private async getCloudEvalForMove(
@@ -743,15 +829,30 @@ export class LichessClient {
     fen: string,
     retryPromptContext: CloudEvalRetryPromptContext | undefined = undefined,
   ): Promise<LichessCloudEvalResponseResult | null> {
-    if (retryPromptContext?.enabled && retryPromptContext.choice === 'use-cached-values') {
-      return null;
-    }
-    return this.queryEvalForFenFromSource(fen);
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    const responses = await this.getCloudEvalResponsesForFens([normalizedFen], retryPromptContext);
+    return responses.get(normalizedFen) ?? null;
   }
 
   protected async queryEvalForFenFromSource(fen: string): Promise<LichessCloudEvalResponseResult | null> {
+    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
+    const responses = await this.queryEvalForFensFromSource([normalizedFen]);
+    return responses.get(normalizedFen) ?? null;
+  }
+
+  protected async queryEvalForFensFromSource(
+    fens: string[],
+  ): Promise<Map<string, LichessCloudEvalResponseResult | null>> {
+    const normalizedFens = [...new Set(fens.map((fen) => normalizeFenWithoutMoveCounters(fen)))];
+    const results = new Map<string, LichessCloudEvalResponseResult | null>();
+    if (normalizedFens.length === 0) {
+      return results;
+    }
     if (this.rocksdbEvalUnavailableReason) {
-      return null;
+      for (const fen of normalizedFens) {
+        results.set(fen, null);
+      }
+      return results;
     }
 
     let service: RocksdbEvalService;
@@ -761,42 +862,93 @@ export class LichessClient {
       const message = error instanceof Error ? error.message : String(error);
       this.rocksdbEvalUnavailableReason = message;
       this.onNetworkStatus(`Warning: local Lichess eval source unavailable; continuing without local eval (${message})`);
-      return null;
+      for (const fen of normalizedFens) {
+        results.set(fen, null);
+      }
+      return results;
+    }
+
+    const candidateFensByRequestedFen = new Map<string, string[]>();
+    const allCandidateFens: string[] = [];
+    const seenCandidateFens = new Set<string>();
+    for (const normalizedFen of normalizedFens) {
+      const fallbackFourFieldFen = toFourFieldFen(normalizedFen);
+      const candidates =
+        fallbackFourFieldFen === normalizedFen ? [normalizedFen] : [normalizedFen, fallbackFourFieldFen];
+      candidateFensByRequestedFen.set(normalizedFen, candidates);
+      for (const candidate of candidates) {
+        if (seenCandidateFens.has(candidate)) {
+          continue;
+        }
+        seenCandidateFens.add(candidate);
+        allCandidateFens.push(candidate);
+      }
     }
 
     let rows: RocksdbEvalQueryRow[];
     try {
-      rows = await service.queryFens([fen]);
+      rows = await service.queryFens(allCandidateFens);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       this.rocksdbEvalUnavailableReason = message;
       this.onNetworkStatus(`Warning: local Lichess eval lookup failed; continuing without local eval (${message})`);
-      return null;
-    }
-    const row = rows[0];
-    if (!row) {
-      return null;
-    }
-    if (row.error) {
-      this.onNetworkStatus(`Warning: local Lichess eval lookup failed for ${fen}: ${row.error}`);
-      return null;
+      for (const fen of normalizedFens) {
+        results.set(fen, null);
+      }
+      return results;
     }
 
-    const cp = typeof row.eval === 'number' && Number.isFinite(row.eval) ? row.eval : undefined;
-    const mate = typeof row.mate === 'number' && Number.isFinite(row.mate) ? row.mate : undefined;
-    if (cp === undefined && mate === undefined) {
-      return null;
+    const rowByCandidateFen = new Map<string, RocksdbEvalQueryRow>();
+    for (const [index, candidateFen] of allCandidateFens.entries()) {
+      rowByCandidateFen.set(candidateFen, rows[index] ?? {
+        fen: candidateFen,
+        eval: null,
+        mate: null,
+        depth: null,
+        first_move: null,
+        error: null,
+      });
     }
-    const depth = typeof row.depth === 'number' && Number.isFinite(row.depth) ? row.depth : undefined;
-    const moves = typeof row.first_move === 'string' && row.first_move.trim() !== '' ? row.first_move : undefined;
-    const response: LichessCloudEvalResponse = {
-      depth,
-      pvs: [{ moves, cp, mate }],
-    };
-    return {
-      data: response,
-      rawResponseText: JSON.stringify(response),
-    };
+
+    for (const normalizedFen of normalizedFens) {
+      const candidateRows = (candidateFensByRequestedFen.get(normalizedFen) ?? [])
+        .map((candidateFen) => rowByCandidateFen.get(candidateFen))
+        .filter((row): row is RocksdbEvalQueryRow => row !== undefined);
+      const rowWithEval = candidateRows
+        .filter((candidate) => !candidate.error && hasRocksdbEval(candidate))
+        .sort((left, right) => rowDepthOrNegativeInfinity(right) - rowDepthOrNegativeInfinity(left))[0];
+      const selectedRow = rowWithEval ?? candidateRows.find((candidate) => !candidate.error) ?? candidateRows[0];
+      if (!selectedRow) {
+        results.set(normalizedFen, null);
+        continue;
+      }
+      if (selectedRow.error) {
+        this.onNetworkStatus(`Warning: local Lichess eval lookup failed for ${normalizedFen}: ${selectedRow.error}`);
+        results.set(normalizedFen, null);
+        continue;
+      }
+      const cp = typeof selectedRow.eval === 'number' && Number.isFinite(selectedRow.eval) ? selectedRow.eval : undefined;
+      const mate =
+        typeof selectedRow.mate === 'number' && Number.isFinite(selectedRow.mate) ? selectedRow.mate : undefined;
+      if (cp === undefined && mate === undefined) {
+        results.set(normalizedFen, null);
+        continue;
+      }
+      const depth =
+        typeof selectedRow.depth === 'number' && Number.isFinite(selectedRow.depth) ? selectedRow.depth : undefined;
+      const moves =
+        typeof selectedRow.first_move === 'string' && selectedRow.first_move.trim() !== '' ? selectedRow.first_move : undefined;
+      const response: LichessCloudEvalResponse = {
+        depth,
+        pvs: [{ moves, cp, mate }],
+      };
+      results.set(normalizedFen, {
+        data: response,
+        rawResponseText: JSON.stringify(response),
+      });
+    }
+
+    return results;
   }
 
   private async getRocksdbEvalService(): Promise<RocksdbEvalService> {

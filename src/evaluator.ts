@@ -127,7 +127,7 @@ export function renderStatsTable(rows: CombinedMoveRow[]): string {
   const evalWidth = Math.max(3, ...evalStrings.map((value) => value.length));
 
   const table = new Table({
-    head: ['Move (SAN)', 'Eval', 'Lichess user', 'Chess.com user', 'Lichess DB'],
+    head: ['Move', 'Eval', 'Lichess user', 'Chess.com user', 'Lichess DB'],
     colAligns: ['left', 'right', 'left', 'left', 'left'],
     wordWrap: true,
   });
