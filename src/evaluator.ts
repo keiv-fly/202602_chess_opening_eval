@@ -17,6 +17,7 @@ const SOURCE_SUFFIXES = [
   'black_percent',
 ] as const;
 const SOURCE_PREFIXES = ['source_lichess_user', 'source_chesscom_user', 'source_lichess_db'] as const;
+const LICHESS_CP_TO_WIN_PROBABILITY_K = 0.00368208;
 const CSV_COLUMNS = [
   'position_fen',
   'position_side_to_move',
@@ -66,11 +67,15 @@ export function mergeStats(
 }
 
 function evalToString(evalValue?: MoveEval): string {
-  if (!evalValue) return 'nan';
+  if (!evalValue) return 'nan|--.-';
   const depthSuffix = evalValue.depth !== undefined ? `/${evalValue.depth}` : '';
-  if (evalValue.cp !== undefined) return `${(evalValue.cp / 100).toFixed(2)}${depthSuffix}`;
-  if (evalValue.mate !== undefined) return `M${evalValue.mate}${depthSuffix}`;
-  return `nan${depthSuffix}`;
+  if (evalValue.cp !== undefined) {
+    const whiteWinChancePercent =
+      (1 / (1 + Math.exp(-LICHESS_CP_TO_WIN_PROBABILITY_K * evalValue.cp))) * 100;
+    return `${(evalValue.cp / 100).toFixed(2)}${depthSuffix}|${whiteWinChancePercent.toFixed(1)}`;
+  }
+  if (evalValue.mate !== undefined) return `M${evalValue.mate}${depthSuffix}|--.-`;
+  return `nan${depthSuffix}|--.-`;
 }
 
 function formatMoveCount(total: number, abbreviateThousands: boolean): string {
@@ -86,7 +91,7 @@ function statsToString(
   columnTotal: number,
   abbreviateThousands: boolean,
 ): string {
-  if (!stats || stats.total === 0) return `${''.padStart(width, ' ')}/--% --.-/--.-/--.-`;
+  if (!stats || stats.total === 0) return `${''.padStart(width, ' ')}/--% --.-/--.-/--.-|--.-`;
 
   const sharePercent = columnTotal > 0 ? Math.round((stats.total / columnTotal) * 100) : null;
   const share =
@@ -99,7 +104,8 @@ function statsToString(
   const ww = percentToString((stats.white / stats.total) * 100);
   const dd = percentToString((stats.draws / stats.total) * 100);
   const bb = percentToString((stats.black / stats.total) * 100);
-  return `${formatMoveCount(stats.total, abbreviateThousands).padStart(width, ' ')}/${share} ${ww}/${dd}/${bb}`;
+  const score = ((((stats.white / stats.total) * 100) + ((stats.draws / stats.total) * 100) / 2)).toFixed(1);
+  return `${formatMoveCount(stats.total, abbreviateThousands).padStart(width, ' ')}/${share} ${ww}/${dd}/${bb}|${score}`;
 }
 
 export function renderStatsTable(rows: CombinedMoveRow[]): string {

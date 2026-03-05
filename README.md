@@ -3,7 +3,7 @@
 Interactive TypeScript CLI that evaluates a chess position by combining:
 - Lichess user move stats
 - Chess.com user move stats
-- Lichess opening database stats and cloud evaluation (shown as `score/depth`, e.g. `0.30/25`)
+- Lichess opening database stats and local RocksDB evaluation via `rust_read_rocksdb_eval` (shown as `score/depth`, e.g. `0.30/25`)
 
 For Lichess user data, the CLI stores monthly NDJSON files in `data_in/lichess_player/<user>/data/` and computes per-position move stats from those local files.
 Lichess opening-database responses are cached by FEN in `data_in/lichess_database/fen/<encoded-fen>`.

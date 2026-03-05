@@ -43,6 +43,14 @@ const SAMPLE_GAMES = [
 
 const tempDirs: string[] = [];
 
+function localEvalResponse(
+  depth: number,
+  pv: { moves?: string; cp?: number; mate?: number },
+): { data: { depth: number; pvs: Array<{ moves?: string; cp?: number; mate?: number }> }; rawResponseText: string } {
+  const data = { depth, pvs: [pv] };
+  return { data, rawResponseText: JSON.stringify(data) };
+}
+
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
@@ -364,18 +372,11 @@ describe('LichessClient', () => {
   it('maps and caches Lichess database move stats by FEN', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-cache-'));
     tempDirs.push(dataDir);
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ moves: [{ san: 'e4', white: 30, draws: 10, black: 20, cp: 34 }] }), {
-          status: 200,
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ depth: 25, pvs: [{ moves: 'e2e4 e7e5', cp: 30 }] }), {
-          status: 200,
-        }),
-      );
+    const fetchImpl = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ moves: [{ san: 'e4', white: 30, draws: 10, black: 20, cp: 34 }] }), {
+        status: 200,
+      }),
+    );
     const client = new LichessClient(
       fetchImpl as unknown as typeof fetch,
       'https://explorer.lichess.ovh',
@@ -384,6 +385,14 @@ describe('LichessClient', () => {
       undefined,
       dataDir,
     );
+    const evalLookupSpy = vi
+      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
+      .mockImplementation(async (fen: string) => {
+        if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
+          return localEvalResponse(25, { moves: 'e2e4 e7e5', cp: 30 });
+        }
+        return null;
+      });
 
     const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 23 19';
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
@@ -391,18 +400,13 @@ describe('LichessClient', () => {
     const cachedDb = await client.getDatabaseMoveStats(fen);
     expect(db[0].eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
     expect(cachedDb[0].eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(evalLookupSpy).toHaveBeenCalledTimes(1);
 
     const dbRequestUrl = fetchImpl.mock.calls[0][0] as URL;
     expect(dbRequestUrl.searchParams.get('moves')).toBe('50');
     expect(dbRequestUrl.searchParams.get('fen')).toBe(normalizedFen);
     expect(dbRequestUrl.searchParams.get('variant')).toBe('standard');
-
-    const evalRequestUrl = fetchImpl.mock.calls[1][0] as URL;
-    expect(evalRequestUrl.pathname).toBe('/api/cloud-eval');
-    expect(evalRequestUrl.searchParams.get('fen')).toBe(
-      'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1',
-    );
 
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
     const cacheText = await readFile(cachePath, 'utf8');
@@ -417,15 +421,63 @@ describe('LichessClient', () => {
     expect(evalText).not.toContain('"source"');
   });
 
+  it('sends bearer auth when querying explorer.lichess.ovh', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-auth-explorer-'));
+    tempDirs.push(dataDir);
+    const fetchImpl = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ moves: [] }), { status: 200 }));
+    const client = new LichessClient(
+      fetchImpl as unknown as typeof fetch,
+      'https://explorer.lichess.ovh',
+      () => {},
+      () => {},
+      undefined,
+      dataDir,
+      () => {},
+      () => 'continue-retries',
+      'test-token',
+    );
+
+    await client.getDatabaseMoveStats(INITIAL_FEN);
+
+    const requestInit = fetchImpl.mock.calls[0][1] as { headers?: Record<string, string> };
+    expect(requestInit.headers?.Authorization).toBe('Bearer test-token');
+  });
+
+  it('does not send bearer auth to non-Lichess hosts', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-auth-non-lichess-'));
+    tempDirs.push(dataDir);
+    const fetchImpl = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ moves: [] }), { status: 200 }));
+    const client = new LichessClient(
+      fetchImpl as unknown as typeof fetch,
+      'https://example.com',
+      () => {},
+      () => {},
+      undefined,
+      dataDir,
+      () => {},
+      () => 'continue-retries',
+      'test-token',
+    );
+
+    await client.getDatabaseMoveStats(INITIAL_FEN);
+
+    const requestInit = fetchImpl.mock.calls[0][1] as { headers?: Record<string, string> };
+    expect(requestInit.headers?.Authorization).toBeUndefined();
+  });
+
   it('backfills lichess_eval files from cached cloud eval map with real API output', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'lichess-eval-backfill-'));
     tempDirs.push(dataDir);
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ depth: 31, pvs: [{ moves: 'e7e5', cp: -42 }] }), {
-        status: 200,
-      }),
-    );
+    const fetchImpl = vi.fn();
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+    const evalLookupSpy = vi
+      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
+      .mockImplementation(async (fen: string) => {
+        if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
+          return localEvalResponse(31, { moves: 'e7e5', cp: -42 });
+        }
+        return null;
+      });
     const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
     await mkdir(join(dataDir, 'lichess_database', 'fen'), { recursive: true });
@@ -442,6 +494,8 @@ describe('LichessClient', () => {
 
     const db = await client.getDatabaseMoveStats(INITIAL_FEN);
     expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: -42, mate: undefined, depth: 31 });
+    expect(fetchImpl).toHaveBeenCalledTimes(0);
+    expect(evalLookupSpy).toHaveBeenCalledTimes(1);
 
     const evalPath = join(dataDir, 'lichess_eval', 'fen', encodeURIComponent(normalizedFen), encodeURIComponent('e4'));
     const evalText = await readFile(evalPath, 'utf8');
@@ -454,65 +508,57 @@ describe('LichessClient', () => {
   it('keeps root cloud eval signs unchanged from API response', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-white-perspective-'));
     tempDirs.push(dataDir);
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ moves: [{ san: 'e5', white: 30, draws: 10, black: 20 }] }), {
-          status: 200,
-        }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ depth: 26, pvs: [{ moves: 'e7e5 g1f3', cp: 40 }] }), {
-          status: 200,
-        }),
-      );
+    const fetchImpl = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ moves: [{ san: 'e5', white: 30, draws: 10, black: 20 }] }), {
+        status: 200,
+      }),
+    );
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+    const evalLookupSpy = vi
+      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
+      .mockResolvedValue(localEvalResponse(26, { moves: 'e7e5 g1f3', cp: 40 }));
 
     const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
     const db = await client.getDatabaseMoveStats(fen);
     expect(db.find((move) => move.san === 'e5')?.eval).toEqual({ cp: 40, mate: undefined, depth: 26 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(evalLookupSpy).toHaveBeenCalledTimes(1);
   });
 
   it('fills missing move evals using child-position cloud eval', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-cloud-eval-all-moves-'));
     tempDirs.push(dataDir);
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            moves: [
-              { san: 'e4', white: 30, draws: 10, black: 20 },
-              { san: 'd4', white: 25, draws: 10, black: 15 },
-            ],
-          }),
-          { status: 200 },
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ depth: 25, pvs: [{ moves: 'e2e4 e7e5', cp: 30 }] }), {
-          status: 200,
+    const fetchImpl = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          moves: [
+            { san: 'e4', white: 30, draws: 10, black: 20 },
+            { san: 'd4', white: 25, draws: 10, black: 15 },
+          ],
         }),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ depth: 20, pvs: [{ moves: 'd7d5', cp: 12 }] }), {
-          status: 200,
-        }),
-      );
+        { status: 200 },
+      ),
+    );
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+    const evalLookupSpy = vi
+      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
+      .mockImplementation(async (fen: string) => {
+        if (fen === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1') {
+          return localEvalResponse(25, { moves: 'e2e4 e7e5', cp: 30 });
+        }
+        if (fen === 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1') {
+          return localEvalResponse(20, { moves: 'd7d5', cp: 12 });
+        }
+        return null;
+      });
 
     const db = await client.getDatabaseMoveStats(INITIAL_FEN);
     const cachedDb = await client.getDatabaseMoveStats(INITIAL_FEN);
     expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
     expect(db.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
     expect(cachedDb.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-
-    const childEvalRequestUrl = fetchImpl.mock.calls[2][0] as URL;
-    expect(childEvalRequestUrl.pathname).toBe('/api/cloud-eval');
-    expect(childEvalRequestUrl.searchParams.get('fen')).toBe(
-      'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1',
-    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(evalLookupSpy).toHaveBeenCalledTimes(2);
 
     const childEvalPath = join(dataDir, 'lichess_eval', 'fen', encodeURIComponent(INITIAL_FEN), encodeURIComponent('d4'));
     const childEvalText = await readFile(childEvalPath, 'utf8');
@@ -524,12 +570,16 @@ describe('LichessClient', () => {
   it('fetches only uncached cloud eval positions first', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-prefers-uncached-'));
     tempDirs.push(dataDir);
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ depth: 20, pvs: [{ moves: 'd7d5', cp: 12 }] }), {
-        status: 200,
-      }),
-    );
+    const fetchImpl = vi.fn();
     const client = new LichessClient(fetchImpl as unknown as typeof fetch, undefined, () => {}, () => {}, undefined, dataDir);
+    const evalLookupSpy = vi
+      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
+      .mockImplementation(async (fen: string) => {
+        if (fen === 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1') {
+          return localEvalResponse(20, { moves: 'd7d5', cp: 12 });
+        }
+        return null;
+      });
     const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
     await mkdir(join(dataDir, 'lichess_database', 'fen'), { recursive: true });
@@ -557,20 +607,14 @@ describe('LichessClient', () => {
     const db = await client.getDatabaseMoveStats(INITIAL_FEN);
     expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
     expect(db.find((move) => move.san === 'd4')?.eval).toEqual({ cp: 12, mate: undefined, depth: 20 });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    const childEvalRequestUrl = fetchImpl.mock.calls[0][0] as URL;
-    expect(childEvalRequestUrl.pathname).toBe('/api/cloud-eval');
-    expect(childEvalRequestUrl.searchParams.get('fen')).toBe(
-      'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1',
-    );
+    expect(fetchImpl).toHaveBeenCalledTimes(0);
+    expect(evalLookupSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('can stop cloud eval retries and continue with cached values after first 429', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-cloud-eval-stop-retries-'));
+  it('keeps cached move evals when local eval lookup returns no row', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'lichess-db-local-eval-missing-'));
     tempDirs.push(dataDir);
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValueOnce(new Response('', { status: 429, statusText: 'Too Many Requests', headers: { 'Retry-After': '0' } }));
+    const fetchImpl = vi.fn();
     const onCloudEvalFirstRetryWhenCacheReady = vi.fn().mockResolvedValue('use-cached-values');
     const client = new LichessClient(
       fetchImpl as unknown as typeof fetch,
@@ -582,6 +626,9 @@ describe('LichessClient', () => {
       () => {},
       onCloudEvalFirstRetryWhenCacheReady,
     );
+    const evalLookupSpy = vi
+      .spyOn(client as unknown as { queryEvalForFenFromSource: (fen: string) => Promise<unknown> }, 'queryEvalForFenFromSource')
+      .mockResolvedValue(null);
     const normalizedFen = normalizeFenWithoutMoveCounters(INITIAL_FEN);
     const cachePath = join(dataDir, 'lichess_database', 'fen', encodeURIComponent(normalizedFen));
     await mkdir(join(dataDir, 'lichess_database', 'fen'), { recursive: true });
@@ -598,8 +645,9 @@ describe('LichessClient', () => {
 
     const db = await client.getDatabaseMoveStats(INITIAL_FEN);
     expect(db.find((move) => move.san === 'e4')?.eval).toEqual({ cp: 30, mate: undefined, depth: 25 });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(onCloudEvalFirstRetryWhenCacheReady).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(0);
+    expect(evalLookupSpy).toHaveBeenCalledTimes(1);
+    expect(onCloudEvalFirstRetryWhenCacheReady).toHaveBeenCalledTimes(0);
   });
 
   it('includes failing NDJSON line when user dump parsing fails', async () => {

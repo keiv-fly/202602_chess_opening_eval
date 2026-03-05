@@ -28,9 +28,10 @@ describe('evaluator', () => {
       },
     ]);
 
-    expect(table).toContain('0.34/25');
-    expect(table).toContain('10/100% 60.0/20.0/20.0');
-    expect(table).toContain('100/100% 50.0/20.0/30.0');
+    expect(table).toContain('0.34/25|53.1');
+    expect(table).toContain('10/100% 60.0/20.0/20.0|70.0');
+    expect(table).toContain('8/100% 62.5/12.5/25.0|68.8');
+    expect(table).toContain('100/100% 50.0/20.0/30.0|60.0');
   });
 
   it('renders 100 percent without decimals and keeps alignment width', () => {
@@ -44,9 +45,9 @@ describe('evaluator', () => {
       },
     ]);
 
-    expect(table).toContain('10/100%  100/ 0.0/ 0.0');
-    expect(table).toContain('10/100%  0.0/ 100/ 0.0');
-    expect(table).toContain('10/100%  0.0/ 0.0/ 100');
+    expect(table).toContain('10/100%  100/ 0.0/ 0.0|100.0');
+    expect(table).toContain('10/100%  0.0/ 100/ 0.0|50.0');
+    expect(table).toContain('10/100%  0.0/ 0.0/ 100|0.0');
   });
 
   it('shows move share and uses k suffix for lichess db when top db row is in millions', () => {

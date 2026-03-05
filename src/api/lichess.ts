@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream, type Dirent, type WriteStream } fr
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import readline from 'node:readline';
+import { pathToFileURL } from 'node:url';
 import { normalizeFenWithoutMoveCounters } from '../fen.js';
 import type { MoveEval, MoveStats, Side } from '../types.js';
 import { fetchWith429Retries, type Retry429Attempt, type Retry429Decision } from './retry.js';
@@ -33,6 +34,20 @@ type LichessCloudEvalResponse = {
 type LichessCloudEvalResponseResult = {
   data: LichessCloudEvalResponse;
   rawResponseText: string;
+};
+
+type RocksdbEvalQueryRow = {
+  fen: string;
+  eval: number | null;
+  mate: number | null;
+  depth: number | null;
+  first_move: string | null;
+  error: string | null;
+};
+
+type RocksdbEvalService = {
+  init: () => Promise<void> | void;
+  queryFens: (fens: string[]) => Promise<RocksdbEvalQueryRow[]>;
 };
 
 type LichessDatabaseCachePayload = {
@@ -310,6 +325,9 @@ export function moveStatsFromLichessGames(
 export class LichessClient {
   private static cloudEvalRequestQueue: Promise<void> = Promise.resolve();
   private readonly downloadedUsers = new Set<string>();
+  private rocksdbEvalServicePromise: Promise<RocksdbEvalService> | null = null;
+  private rocksdbEvalInitialized = false;
+  private rocksdbEvalUnavailableReason: string | null = null;
 
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
@@ -652,7 +670,7 @@ export class LichessClient {
     const childResult = await this.getCloudEvalResponse(childFen, retryPromptContext);
     if (childResult) {
       await this.writeCloudEvalResponseForMove(fen, san, childResult.rawResponseText);
-      this.onNetworkStatus(`Status: Lichess cloud-eval move ${san} ok.`);
+      this.onNetworkStatus(`Status: Lichess local-eval move ${san} ok.`);
     }
     const childData = childResult?.data ?? null;
     const childEval = this.getPrimaryCloudEval(childData);
@@ -728,36 +746,79 @@ export class LichessClient {
     if (retryPromptContext?.enabled && retryPromptContext.choice === 'use-cached-values') {
       return null;
     }
+    return this.queryEvalForFenFromSource(fen);
+  }
 
-    return this.runCloudEvalRequestSequentially(async () => {
-      const url = new URL('/api/cloud-eval', this.gamesBaseUrl);
-      url.searchParams.set('fen', fen);
+  protected async queryEvalForFenFromSource(fen: string): Promise<LichessCloudEvalResponseResult | null> {
+    if (this.rocksdbEvalUnavailableReason) {
+      return null;
+    }
 
-      try {
-        return await this.requestJsonWithRaw<LichessCloudEvalResponse>(url, {
-          logNetwork: false,
-          onBefore429Retry: (attempt) => this.handleCloudEval429Retry(attempt, retryPromptContext),
-          onWaitFor429Retry: (attempt) => this.waitForCloudEvalRetryWaitInput(attempt, retryPromptContext),
-          max429Retries: LICHESS_CLOUD_EVAL_MAX_429_RETRIES,
-          retryWarningSuffix: ' Press "s" to stop Lichess retries only (Chess.com downloads continue).',
-        });
-      } catch (error: unknown) {
-        if (error instanceof Error && error.message.includes('Lichess API error 404')) {
-          return null;
-        }
-        if (error instanceof Error && error.message.includes('Lichess API error 429')) {
-          if (retryPromptContext) {
-            retryPromptContext.enabled = true;
-            retryPromptContext.choice = 'use-cached-values';
-          }
-          this.onNetworkStatus(
-            'Cloud eval: retries exhausted; stopping further Lichess eval downloads for this position (Chess.com continues).',
-          );
-          return null;
-        }
-        throw error;
-      }
-    });
+    let service: RocksdbEvalService;
+    try {
+      service = await this.getRocksdbEvalService();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.rocksdbEvalUnavailableReason = message;
+      this.onNetworkStatus(`Warning: local Lichess eval source unavailable; continuing without local eval (${message})`);
+      return null;
+    }
+
+    let rows: RocksdbEvalQueryRow[];
+    try {
+      rows = await service.queryFens([fen]);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.rocksdbEvalUnavailableReason = message;
+      this.onNetworkStatus(`Warning: local Lichess eval lookup failed; continuing without local eval (${message})`);
+      return null;
+    }
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    if (row.error) {
+      this.onNetworkStatus(`Warning: local Lichess eval lookup failed for ${fen}: ${row.error}`);
+      return null;
+    }
+
+    const cp = typeof row.eval === 'number' && Number.isFinite(row.eval) ? row.eval : undefined;
+    const mate = typeof row.mate === 'number' && Number.isFinite(row.mate) ? row.mate : undefined;
+    if (cp === undefined && mate === undefined) {
+      return null;
+    }
+    const depth = typeof row.depth === 'number' && Number.isFinite(row.depth) ? row.depth : undefined;
+    const moves = typeof row.first_move === 'string' && row.first_move.trim() !== '' ? row.first_move : undefined;
+    const response: LichessCloudEvalResponse = {
+      depth,
+      pvs: [{ moves, cp, mate }],
+    };
+    return {
+      data: response,
+      rawResponseText: JSON.stringify(response),
+    };
+  }
+
+  private async getRocksdbEvalService(): Promise<RocksdbEvalService> {
+    if (!this.rocksdbEvalServicePromise) {
+      this.rocksdbEvalServicePromise = this.loadRocksdbEvalService();
+    }
+    const service = await this.rocksdbEvalServicePromise;
+    if (!this.rocksdbEvalInitialized) {
+      await service.init();
+      this.rocksdbEvalInitialized = true;
+    }
+    return service;
+  }
+
+  private async loadRocksdbEvalService(): Promise<RocksdbEvalService> {
+    const servicePath = resolve(process.cwd(), 'rust_read_rocksdb_eval', 'service.js');
+    const moduleUrl = pathToFileURL(servicePath).href;
+    const loaded = (await import(moduleUrl)) as Partial<RocksdbEvalService>;
+    if (typeof loaded.init !== 'function' || typeof loaded.queryFens !== 'function') {
+      throw new Error(`Invalid rust_read_rocksdb_eval service module: ${servicePath}`);
+    }
+    return loaded as RocksdbEvalService;
   }
 
   private async waitForCloudEvalRetryWaitInput(
@@ -1484,7 +1545,7 @@ export class LichessClient {
   }
 
   private isLichessApiHost(url: URL): boolean {
-    return /(^|\.)lichess\.org$/iu.test(url.hostname);
+    return /(^|\.)lichess\.org$/iu.test(url.hostname) || url.hostname.toLowerCase() === 'explorer.lichess.ovh';
   }
 
   private parseUserGameLine(line: string, source: string): LichessUserGame {
