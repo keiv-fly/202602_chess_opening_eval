@@ -3,6 +3,7 @@ dist/
 .env
 data_in/
 data_out/
+lichess_eval_rocksdb/
 __pycache__/
 *.zst
 player.ndjson

@@ -1,0 +1,25 @@
+{
+  "name": "rust-read-rocksdb-eval",
+  "version": "0.1.0",
+  "private": true,
+  "description": "napi-rs addon for reading lichess_eval_rocksdb",
+  "type": "module",
+  "main": "service.js",
+  "types": "service.d.ts",
+  "scripts": {
+    "build": "napi build --platform --release --js binding.cjs --dts binding.d.ts .",
+    "build:debug": "napi build --platform --js binding.cjs --dts binding.d.ts .",
+    "test:rust": "cargo test",
+    "test:node": "npm run build && vitest run",
+    "test": "npm run test:rust && npm run test:node"
+  },
+  "napi": {
+    "name": "rust_read_rocksdb_eval"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4",
+    "@types/node": "^25.3.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  }
+}
