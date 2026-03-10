@@ -10,6 +10,14 @@ export class SessionCache {
     return value;
   }
 
+  deleteByPrefix(prefix: string): void {
+    for (const key of this.store.keys()) {
+      if (key.startsWith(prefix)) {
+        this.store.delete(key);
+      }
+    }
+  }
+
   getOrSet<T>(key: string, factory: () => Promise<T>): Promise<T> {
     const cached = this.get<T>(key);
     if (cached !== undefined) return Promise.resolve(cached);

@@ -114,7 +114,7 @@ function calculateMovePotential(
   const allUserGames = sourceTotals.lichessUser + sourceTotals.chessComUser;
   const moveShare = allUserGames > 0 ? moveCombinedTotal / allUserGames : 0;
 
-  return (actualScoreRate - (baseScoreRate ?? 0) * moveShare) * 100;
+  return (actualScoreRate - (baseScoreRate ?? 0)) * moveShare * 10_000;
 }
 
 function formatMovePotential(value: number): string {
@@ -152,13 +152,36 @@ function statsToString(
   return `${formatMoveCount(stats.total, abbreviateThousands).padStart(width, ' ')}/${share} ${ww}/${dd}/${bb}|${score}`;
 }
 
+function statsScoreToString(stats: MoveStats | undefined): string {
+  if (!stats || stats.total === 0) return '--.-';
+  return ((((stats.white / stats.total) * 100) + ((stats.draws / stats.total) * 100) / 2)).toFixed(1);
+}
+
+function combineUserStatsForRow(row: CombinedMoveRow): MoveStats | undefined {
+  const lichessUser = row.lichessUser;
+  const chessComUser = row.chessComUser;
+  const combinedTotal = (lichessUser?.total ?? 0) + (chessComUser?.total ?? 0);
+  if (combinedTotal <= 0) return undefined;
+
+  return {
+    san: row.san,
+    total: combinedTotal,
+    white: (lichessUser?.white ?? 0) + (chessComUser?.white ?? 0),
+    draws: (lichessUser?.draws ?? 0) + (chessComUser?.draws ?? 0),
+    black: (lichessUser?.black ?? 0) + (chessComUser?.black ?? 0),
+  };
+}
+
 export function renderStatsTable(rows: CombinedMoveRow[]): string {
   const maxLichessUser = Math.max(0, ...rows.map((r) => r.lichessUser?.total ?? 0));
   const maxChessCom = Math.max(0, ...rows.map((r) => r.chessComUser?.total ?? 0));
+  const userStats = rows.map((row) => combineUserStatsForRow(row));
+  const userScoreStrings = userStats.map((stats) => statsScoreToString(stats));
   const useThousandsForLichessDb = (rows[0]?.lichessDb?.total ?? 0) >= 1_000_000;
 
   const luWidth = formatMoveCount(maxLichessUser, false).length;
   const ccWidth = formatMoveCount(maxChessCom, false).length;
+  const userWidth = Math.max('User'.length, ...userScoreStrings.map((value) => value.length));
   const dbWidth = Math.max(
     1,
     ...rows.map((row) => formatMoveCount(row.lichessDb?.total ?? 0, useThousandsForLichessDb).length),
@@ -177,8 +200,8 @@ export function renderStatsTable(rows: CombinedMoveRow[]): string {
   const potWidth = Math.max('Pot.'.length, ...potStrings.map((value) => value.length));
 
   const table = new Table({
-    head: ['Move', 'Eval', 'Lichess user', 'Chess.com user', 'Lichess DB', 'Pot.'],
-    colAligns: ['left', 'right', 'left', 'left', 'left', 'right'],
+    head: ['Move', 'Eval', 'Lichess user', 'Chess.com user', 'User', 'Lichess DB', 'Pot.'],
+    colAligns: ['left', 'right', 'left', 'left', 'right', 'left', 'right'],
     wordWrap: true,
   });
 
@@ -188,6 +211,7 @@ export function renderStatsTable(rows: CombinedMoveRow[]): string {
       evalStrings[index].padStart(evalWidth, ' '),
       statsToString(row.lichessUser, luWidth, lichessUserTotal, false),
       statsToString(row.chessComUser, ccWidth, chessComTotal, false),
+      userScoreStrings[index].padStart(userWidth, ' '),
       statsToString(row.lichessDb, dbWidth, lichessDbTotal, useThousandsForLichessDb),
       potStrings[index].padStart(potWidth, ' '),
     ]);

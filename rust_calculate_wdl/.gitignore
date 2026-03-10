@@ -1,0 +1,8 @@
+node_modules/
+target/
+*.node
+Cargo.lock
+binding.cjs
+binding.d.ts
+index.js
+index.d.ts

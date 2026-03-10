@@ -31,8 +31,9 @@ describe('evaluator', () => {
     expect(table).toContain('0.34/25|53.1');
     expect(table).toContain('10/100% 60.0/20.0/20.0|70.0');
     expect(table).toContain('8/100% 62.5/12.5/25.0|68.8');
+    expect(table).toMatch(/│\s*69\.4\s*│/);
     expect(table).toContain('100/100% 50.0/20.0/30.0|60.0');
-    expect(table).toContain('9.4');
+    expect(table).toContain('944.4');
   });
 
   it('renders 100 percent without decimals and keeps alignment width', () => {
@@ -48,6 +49,7 @@ describe('evaluator', () => {
 
     expect(table).toContain('10/100%  100/ 0.0/ 0.0|100.0');
     expect(table).toContain('10/100%  0.0/ 100/ 0.0|50.0');
+    expect(table).toMatch(/│\s*75\.0\s*│/);
     expect(table).toContain('10/100%  0.0/ 0.0/ 100|0.0');
   });
 
@@ -71,6 +73,8 @@ describe('evaluator', () => {
 
     expect(table).toContain('10/50%');
     expect(table).toContain('8/50%');
+    expect(table).toContain('69.4');
+    expect(table).toContain('52.8');
     expect(table).toContain('403048k/50%');
   });
 
@@ -130,7 +134,7 @@ describe('evaluator', () => {
     const data = dataLine.split(',');
     const movePotIndex = headers.indexOf('move_pot');
     expect(movePotIndex).toBeGreaterThanOrEqual(0);
-    expect(data[movePotIndex]).toBe('50');
+    expect(data[movePotIndex]).toBe('5000');
   });
 
   it('calculates move_pot using white wins and draws/2', () => {
@@ -144,6 +148,43 @@ describe('evaluator', () => {
       },
     ]);
 
-    expect(table).toContain('5.0');
+    expect(table).toContain('500.0');
+  });
+
+  it('scales move_pot by move share after score difference', () => {
+    const csv = renderStatsCsv(
+      [
+        {
+          san: 'e4',
+          eval: { cp: 0, depth: 20 },
+          lichessUser: { san: 'e4', total: 10, white: 6, draws: 2, black: 2 },
+          chessComUser: { san: 'e4', total: 0, white: 0, draws: 0, black: 0 },
+          lichessDb: { san: 'e4', total: 100, white: 50, draws: 20, black: 30 },
+        },
+        {
+          san: 'd4',
+          eval: { cp: 0, depth: 20 },
+          lichessUser: { san: 'd4', total: 10, white: 5, draws: 2, black: 3 },
+          chessComUser: { san: 'd4', total: 0, white: 0, draws: 0, black: 0 },
+          lichessDb: { san: 'd4', total: 100, white: 50, draws: 20, black: 30 },
+        },
+      ],
+      {
+        fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        side: 'white',
+      },
+    );
+
+    const [headerLine, ...dataLines] = csv.split('\n');
+    const headers = headerLine.split(',');
+    const moveSanIndex = headers.indexOf('move_san');
+    const movePotIndex = headers.indexOf('move_pot');
+    expect(moveSanIndex).toBeGreaterThanOrEqual(0);
+    expect(movePotIndex).toBeGreaterThanOrEqual(0);
+
+    const e4Line = dataLines.find((line) => line.split(',')[moveSanIndex] === 'e4');
+    expect(e4Line).toBeDefined();
+    const e4Values = e4Line!.split(',');
+    expect(e4Values[movePotIndex]).toBe('500');
   });
 });

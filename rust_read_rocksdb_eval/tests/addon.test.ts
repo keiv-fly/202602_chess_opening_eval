@@ -5,7 +5,7 @@ import { close, currentDbPath, getDefaultDbPath, init, isInitialized, queryFens 
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const INVALID_FEN = 'this is not a fen';
-const repoDbPath = resolve(process.cwd(), '..', 'lichess_eval_rocksdb');
+const repoDbPath = resolve(process.cwd(), 'lichess_eval_rocksdb');
 
 afterEach(async () => {
   await close();
@@ -13,7 +13,7 @@ afterEach(async () => {
 
 describe('rust_read_rocksdb_eval addon', () => {
   it('exports a fixed default db path in repo root', () => {
-    expect(getDefaultDbPath()).toBe(resolve(process.cwd(), '..', 'lichess_eval_rocksdb'));
+    expect(getDefaultDbPath()).toBe(resolve(process.cwd(), 'lichess_eval_rocksdb'));
   });
 
   it('returns per-item errors for invalid fens and keeps row shape', async () => {

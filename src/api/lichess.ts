@@ -1,11 +1,12 @@
 import { Chess } from 'chess.js';
 import { createReadStream, createWriteStream, type Dirent, type WriteStream } from 'node:fs';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { normalizeFenWithoutMoveCounters } from '../fen.js';
 import type { MoveEval, MoveStats, Side } from '../types.js';
+import { tryCalculateMoveStatsWithRust } from './rustWdl.js';
 import { fetchWith429Retries, type Retry429Attempt, type Retry429Decision } from './retry.js';
 
 type LichessMove = {
@@ -112,14 +113,27 @@ type UserDumpStepTotals = {
 type UserCachePaths = {
   playerDirectory: string;
   dataDirectory: string;
+  dataUciDirectory: string;
+  byFenDirectory: string;
   lastAvailableAtPath: string;
   monthlyGameCountCsvPath: string;
+};
+
+type UserByFenCachePayload = {
+  source: 'lichess-user-by-fen-v1';
+  fen: string;
+  side: Side;
+  sinceTimestampMs: number | null;
+  generatedAt: number;
+  moves: MoveStats[];
 };
 
 const LICHESS_USER_PAGE_SIZE = 100000;
 const USER_DUMP_PROGRESS_UPDATE_STEP = 25;
 const LICHESS_PLAYER_CACHE_ROOT = 'lichess_player';
 const LICHESS_PLAYER_DATA_DIRECTORY = 'data';
+const LICHESS_PLAYER_DATA_UCI_DIRECTORY = 'data_uci';
+const LICHESS_PLAYER_BY_FEN_DIRECTORY = 'by_fen';
 const LICHESS_PLAYER_LAST_AVAILABLE_AT_FILE = 'last_available_at.txt';
 const LICHESS_PLAYER_MONTHLY_GAME_COUNT_FILE = 'monthly_games.csv';
 const LICHESS_DATABASE_CACHE_ROOT = 'lichess_database';
@@ -145,6 +159,15 @@ function formatYearMonth(createdAt: number): string {
 function parseYearMonthFromDataFileName(fileName: string): string | null {
   const match = /^(\d{4}-\d{2})\.ndjson$/u.exec(fileName);
   return match ? match[1] : null;
+}
+
+function parseYearMonthFromSanFileName(fileName: string): string | null {
+  const match = /^(\d{4}-\d{2})\.txt$/u.exec(fileName);
+  return match ? match[1] : null;
+}
+
+function sinceTimestampCacheKey(sinceTimestampMs: number | null): string {
+  return sinceTimestampMs === null ? 'all-time' : `since-${sinceTimestampMs}`;
 }
 
 function isMissingFileError(error: unknown): boolean {
@@ -212,7 +235,7 @@ function extractPlayerName(game: LichessUserGame, side: Side): string | null {
   return parsePgnTagValue(game.pgn, side === 'white' ? 'White' : 'Black')?.toLowerCase() ?? null;
 }
 
-function applyMove(chess: Chess, moveText: string): string | null {
+function applyMoveVerbose(chess: Chess, moveText: string): ReturnType<Chess['move']> | null {
   const trimmed = moveText.trim();
   if (trimmed === '') {
     return null;
@@ -224,19 +247,22 @@ function applyMove(chess: Chess, moveText: string): string | null {
     const to = uciMatch[2];
     const promotion = uciMatch[3]?.toLowerCase() as 'q' | 'r' | 'b' | 'n' | undefined;
     try {
-      const move = chess.move({ from, to, promotion });
-      return move?.san ?? null;
+      return chess.move({ from, to, promotion }) ?? null;
     } catch {
       return null;
     }
   }
 
   try {
-    const sanMove = chess.move(trimmed, { strict: false });
-    return sanMove?.san ?? null;
+    return chess.move(trimmed, { strict: false }) ?? null;
   } catch {
     return null;
   }
+}
+
+function applyMove(chess: Chess, moveText: string): string | null {
+  const move = applyMoveVerbose(chess, moveText);
+  return move?.san ?? null;
 }
 
 function mapDatabaseMoves(
@@ -320,6 +346,98 @@ function sortMoveStats(stats: Iterable<MoveStats>): MoveStats[] {
   return [...stats].sort((a, b) => b.total - a.total || a.san.localeCompare(b.san));
 }
 
+function parseMoveStatsArray(raw: unknown): MoveStats[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+
+  const parsed: MoveStats[] = [];
+  for (const row of raw) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      return null;
+    }
+
+    const san = typeof (row as { san?: unknown }).san === 'string' ? (row as { san: string }).san : null;
+    const white = typeof (row as { white?: unknown }).white === 'number' ? (row as { white: number }).white : null;
+    const draws = typeof (row as { draws?: unknown }).draws === 'number' ? (row as { draws: number }).draws : null;
+    const black = typeof (row as { black?: unknown }).black === 'number' ? (row as { black: number }).black : null;
+
+    if (san === null || white === null || draws === null || black === null) {
+      return null;
+    }
+    if (!Number.isFinite(white) || !Number.isFinite(draws) || !Number.isFinite(black)) {
+      return null;
+    }
+
+    parsed.push({
+      san,
+      white,
+      draws,
+      black,
+      total: white + draws + black,
+    });
+  }
+
+  return sortMoveStats(parsed);
+}
+
+function outcomeToWhiteResultChar(outcome: 'white' | 'black' | 'draw' | null): 'w' | 'd' | 'l' | null {
+  if (outcome === 'white') {
+    return 'w';
+  }
+  if (outcome === 'draw') {
+    return 'd';
+  }
+  if (outcome === 'black') {
+    return 'l';
+  }
+  return null;
+}
+
+function addMoveStatFromUciLine(
+  map: Map<string, MoveStats>,
+  result: 'w' | 'd' | 'l',
+  uciMoves: string[],
+  targetFen: string,
+): void {
+  const normalizedTargetFen = normalizeFenWithoutMoveCounters(targetFen);
+  const replay = new Chess();
+  let targetMoveSan: string | null = null;
+
+  for (const uciText of uciMoves) {
+    if (normalizeFenWithoutMoveCounters(replay.fen()) === normalizedTargetFen) {
+      targetMoveSan = applyMove(replay, uciText);
+      break;
+    }
+    if (!applyMove(replay, uciText)) {
+      return;
+    }
+  }
+
+  if (!targetMoveSan) {
+    return;
+  }
+
+  const existing = map.get(targetMoveSan) ?? {
+    san: targetMoveSan,
+    white: 0,
+    draws: 0,
+    black: 0,
+    total: 0,
+  };
+
+  if (result === 'w') {
+    existing.white += 1;
+  } else if (result === 'd') {
+    existing.draws += 1;
+  } else {
+    existing.black += 1;
+  }
+
+  existing.total += 1;
+  map.set(targetMoveSan, existing);
+}
+
 function extractCreatedAtTimestamp(line: string): number | null {
   const match = line.match(/"createdAt"\s*:\s*(\d+)/);
   if (!match) {
@@ -362,12 +480,21 @@ export class LichessClient {
       request: CloudEvalRetryPromptRequest,
     ) => Promise<CloudEvalRetryChoice> | CloudEvalRetryChoice = () => 'continue-retries',
     private readonly apiToken: string | null = (process.env.LICHESS_API_TOKEN ?? '').trim() || null,
+    private readonly onDataUciBuildProgress: (processedFiles: number, totalFiles: number, done: boolean) => void = () =>
+      {},
   ) {}
 
   async getUserMoveStats(user: string, fen: string, side: Side, sinceTimestampMs: number | null = null): Promise<MoveStats[]> {
     const cachePaths = await this.ensureUserGamesCache(user);
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
-    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, normalizedFen, side, sinceTimestampMs);
+    return this.getOrCreateUserMoveStatsByFenCache(
+      cachePaths,
+      user,
+      normalizedFen,
+      side,
+      sinceTimestampMs,
+      true,
+    );
   }
 
   async getUserMoveStatsFromDownloadedGames(
@@ -378,7 +505,14 @@ export class LichessClient {
   ): Promise<MoveStats[]> {
     const cachePaths = this.userCachePaths(user);
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
-    return this.readUserMoveStatsFromDirectory(cachePaths.dataDirectory, user, normalizedFen, side, sinceTimestampMs);
+    return this.getOrCreateUserMoveStatsByFenCache(
+      cachePaths,
+      user,
+      normalizedFen,
+      side,
+      sinceTimestampMs,
+      false,
+    );
   }
 
   async getDatabaseMoveStats(fen: string): Promise<Array<MoveStats & { eval?: MoveEval }>> {
@@ -433,15 +567,20 @@ export class LichessClient {
     return mapDatabaseMoves(moves, cloudEvalsBySan);
   }
 
-  private async ensureUserGamesCache(user: string): Promise<UserCachePaths> {
+  private async ensureUserGamesCache(user: string, forceSync = false): Promise<UserCachePaths> {
     const userKey = user.toLowerCase();
     const cachePaths = this.userCachePaths(user);
-    if (this.downloadedUsers.has(userKey)) {
+    if (!forceSync && this.downloadedUsers.has(userKey)) {
       return cachePaths;
     }
 
     await mkdir(cachePaths.dataDirectory, { recursive: true });
+    await this.migrateLegacySanDirectory(cachePaths.playerDirectory, cachePaths.dataUciDirectory);
+    await mkdir(cachePaths.dataUciDirectory, { recursive: true });
+    await mkdir(cachePaths.byFenDirectory, { recursive: true });
     await this.syncUserGames(user, cachePaths);
+    await this.ensureUciDataFiles(cachePaths, user, true);
+    await this.clearByFenCacheDirectory(cachePaths.byFenDirectory);
     this.downloadedUsers.add(userKey);
     return cachePaths;
   }
@@ -453,9 +592,94 @@ export class LichessClient {
     return {
       playerDirectory,
       dataDirectory,
+      dataUciDirectory: resolve(playerDirectory, LICHESS_PLAYER_DATA_UCI_DIRECTORY),
+      byFenDirectory: resolve(playerDirectory, LICHESS_PLAYER_BY_FEN_DIRECTORY),
       lastAvailableAtPath: resolve(playerDirectory, LICHESS_PLAYER_LAST_AVAILABLE_AT_FILE),
       monthlyGameCountCsvPath: resolve(playerDirectory, LICHESS_PLAYER_MONTHLY_GAME_COUNT_FILE),
     };
+  }
+
+  private byFenCachePath(
+    byFenDirectory: string,
+    fen: string,
+    side: Side,
+    sinceTimestampMs: number | null,
+  ): string {
+    return resolve(byFenDirectory, `${encodeURIComponent(fen)}__${side}__${sinceTimestampCacheKey(sinceTimestampMs)}.json`);
+  }
+
+  private async clearByFenCacheDirectory(byFenDirectory: string): Promise<void> {
+    await rm(byFenDirectory, { recursive: true, force: true });
+    await mkdir(byFenDirectory, { recursive: true });
+  }
+
+  private async getOrCreateUserMoveStatsByFenCache(
+    cachePaths: UserCachePaths,
+    user: string,
+    fen: string,
+    side: Side,
+    sinceTimestampMs: number | null,
+    forceRefresh: boolean,
+  ): Promise<MoveStats[]> {
+    await this.ensureUciDataFiles(cachePaths, user, false);
+    const cachePath = this.byFenCachePath(cachePaths.byFenDirectory, fen, side, sinceTimestampMs);
+    if (!forceRefresh) {
+      const cached = await this.readUserMoveStatsByFenCache(cachePath, fen, side, sinceTimestampMs);
+      if (cached) {
+        this.onNetworkStatus(
+          `Lichess by_fen cache hit for ${side} ${sinceTimestampCacheKey(
+            sinceTimestampMs,
+          )}; values are sourced from data_uci`,
+        );
+        return cached;
+      }
+    }
+
+    const stats = await this.readUserMoveStatsFromUciDirectory(cachePaths.dataUciDirectory, fen, side, sinceTimestampMs);
+    await this.writeUserMoveStatsByFenCache(cachePath, {
+      source: 'lichess-user-by-fen-v1',
+      fen,
+      side,
+      sinceTimestampMs,
+      generatedAt: Date.now(),
+      moves: stats,
+    });
+    return stats;
+  }
+
+  private async readUserMoveStatsByFenCache(
+    cachePath: string,
+    fen: string,
+    side: Side,
+    sinceTimestampMs: number | null,
+  ): Promise<MoveStats[] | null> {
+    let text: string;
+    try {
+      text = await readFile(cachePath, 'utf8');
+    } catch (error: unknown) {
+      if (isMissingFileError(error)) {
+        return null;
+      }
+      throw error;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as Partial<UserByFenCachePayload>;
+      if (parsed.source !== 'lichess-user-by-fen-v1') {
+        return null;
+      }
+      if (parsed.fen !== fen || parsed.side !== side || parsed.sinceTimestampMs !== sinceTimestampMs) {
+        return null;
+      }
+      return parseMoveStatsArray(parsed.moves) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeUserMoveStatsByFenCache(cachePath: string, payload: UserByFenCachePayload): Promise<void> {
+    await mkdir(resolve(cachePath, '..'), { recursive: true });
+    await writeFile(cachePath, `${JSON.stringify(payload)}\n`, 'utf8');
   }
 
   private databaseCachePathForFen(fen: string): string {
@@ -1200,42 +1424,220 @@ export class LichessClient {
     this.onNetworkStatus(`Lichess user dump: finished with ${downloadedGames} new games in ${elapsedMs}ms`);
   }
 
-  private async readUserMoveStatsFromDirectory(
-    dataDirectory: string,
-    user: string,
+  private async readUserMoveStatsFromUciDirectory(
+    dataUciDirectory: string,
     fen: string,
     side: Side,
     sinceTimestampMs: number | null = null,
   ): Promise<MoveStats[]> {
     const minYearMonth = sinceTimestampMs === null ? null : formatYearMonth(sinceTimestampMs);
-    const filePaths = await this.listMonthlyDataFiles(dataDirectory, minYearMonth);
+    const startedAt = Date.now();
+    const filePaths = await this.listMonthlyUciFiles(resolve(dataUciDirectory, side), minYearMonth);
+    this.onNetworkStatus(
+      `Lichess data_uci: using ${side} files (${filePaths.length}) for fen query${
+        minYearMonth ? ` since ${minYearMonth}` : ''
+      }`,
+    );
+
+    const rustStats = await tryCalculateMoveStatsWithRust(filePaths, fen, (message) =>
+      this.onNetworkStatus(`Lichess data_uci: ${message}`),
+    );
+    if (rustStats !== null) {
+      const stats = sortMoveStats(rustStats);
+      this.onNetworkStatus(
+        `Lichess data_uci: loaded ${stats.length} candidate moves from ${filePaths.length} files in ${
+          Date.now() - startedAt
+        }ms (Rust)`,
+      );
+      return stats;
+    }
+
     const map = new Map<string, MoveStats>();
     for (const filePath of filePaths) {
       const fileStream = createReadStream(filePath, { encoding: 'utf8' });
       const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
-      let lineNumber = 0;
       try {
         for await (const rawLine of rl) {
-          lineNumber += 1;
           const line = rawLine.trim();
           if (line === '') {
             continue;
           }
-          const game = this.parseUserGameLine(line, `${filePath}#${lineNumber}`);
-          if (sinceTimestampMs !== null) {
-            const createdAt = typeof game.createdAt === 'number' && Number.isFinite(game.createdAt) ? game.createdAt : null;
-            if (createdAt === null || createdAt < sinceTimestampMs) {
-              continue;
-            }
+          const separatorIndex = line.indexOf('|');
+          if (separatorIndex <= 0) {
+            continue;
           }
-          addGameMoveStat(map, game, user, fen, side);
+          const resultToken = line.slice(0, separatorIndex).trim();
+          if (resultToken !== 'w' && resultToken !== 'd' && resultToken !== 'l') {
+            continue;
+          }
+          const movesText = line.slice(separatorIndex + 1).trim();
+          const uciMoves = movesText === '' ? [] : movesText.split(/\s+/u);
+          addMoveStatFromUciLine(map, resultToken, uciMoves, fen);
         }
       } finally {
         rl.close();
         fileStream.destroy();
       }
     }
-    return sortMoveStats(map.values());
+    const stats = sortMoveStats(map.values());
+    this.onNetworkStatus(
+      `Lichess data_uci: loaded ${stats.length} candidate moves from ${filePaths.length} files in ${Date.now() - startedAt}ms`,
+    );
+    return stats;
+  }
+
+  private async ensureUciDataFiles(cachePaths: UserCachePaths, user: string, rebuildAll: boolean): Promise<void> {
+    const startedAt = Date.now();
+    const whiteUciDirectory = resolve(cachePaths.dataUciDirectory, 'white');
+    const blackUciDirectory = resolve(cachePaths.dataUciDirectory, 'black');
+    await mkdir(whiteUciDirectory, { recursive: true });
+    await mkdir(blackUciDirectory, { recursive: true });
+
+    const whiteMonths = new Set(
+      (await this.listMonthlyUciFiles(whiteUciDirectory))
+        .map((filePath) => parseYearMonthFromSanFileName(basename(filePath)))
+        .filter((yearMonth): yearMonth is string => yearMonth !== null),
+    );
+    const blackMonths = new Set(
+      (await this.listMonthlyUciFiles(blackUciDirectory))
+        .map((filePath) => parseYearMonthFromSanFileName(basename(filePath)))
+        .filter((yearMonth): yearMonth is string => yearMonth !== null),
+    );
+    const dataFilePaths = await this.listMonthlyDataFiles(cachePaths.dataDirectory);
+    const pendingEntries = dataFilePaths
+      .map((dataFilePath) => {
+        const yearMonth = parseYearMonthFromDataFileName(basename(dataFilePath));
+        if (!yearMonth) {
+          return null;
+        }
+        const shouldCreateWhite = rebuildAll || !whiteMonths.has(yearMonth);
+        const shouldCreateBlack = rebuildAll || !blackMonths.has(yearMonth);
+        if (!shouldCreateWhite && !shouldCreateBlack) {
+          return null;
+        }
+        return { dataFilePath, yearMonth, shouldCreateWhite, shouldCreateBlack };
+      })
+      .filter(
+        (
+          entry,
+        ): entry is {
+          dataFilePath: string;
+          yearMonth: string;
+          shouldCreateWhite: boolean;
+          shouldCreateBlack: boolean;
+        } => entry !== null,
+      );
+    let createdWhiteFiles = 0;
+    let createdBlackFiles = 0;
+    let processedDataFiles = 0;
+    if (pendingEntries.length > 0) {
+      this.onDataUciBuildProgress(0, pendingEntries.length, false);
+    }
+    try {
+      for (const entry of pendingEntries) {
+        const { dataFilePath, yearMonth, shouldCreateWhite, shouldCreateBlack } = entry;
+
+        const whiteLines: string[] = [];
+        const blackLines: string[] = [];
+        const fileStream = createReadStream(dataFilePath, { encoding: 'utf8' });
+        const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
+        let lineNumber = 0;
+        try {
+          for await (const rawLine of rl) {
+            lineNumber += 1;
+            const line = rawLine.trim();
+            if (line === '') {
+              continue;
+            }
+            const game = this.parseUserGameLine(line, `${dataFilePath}#${lineNumber}`);
+            const record = this.buildSanRecordFromGame(game, user);
+            if (!record) {
+              continue;
+            }
+            if (record.side === 'white') {
+              whiteLines.push(record.line);
+            } else {
+              blackLines.push(record.line);
+            }
+          }
+        } finally {
+          rl.close();
+          fileStream.destroy();
+        }
+
+        if (shouldCreateWhite) {
+          const whitePath = resolve(whiteUciDirectory, `${yearMonth}.txt`);
+          await writeFile(whitePath, whiteLines.length === 0 ? '' : `${whiteLines.join('\n')}\n`, 'utf8');
+          createdWhiteFiles += 1;
+        }
+        if (shouldCreateBlack) {
+          const blackPath = resolve(blackUciDirectory, `${yearMonth}.txt`);
+          await writeFile(blackPath, blackLines.length === 0 ? '' : `${blackLines.join('\n')}\n`, 'utf8');
+          createdBlackFiles += 1;
+        }
+
+        processedDataFiles += 1;
+        this.onDataUciBuildProgress(processedDataFiles, pendingEntries.length, false);
+      }
+    } finally {
+      if (pendingEntries.length > 0) {
+        this.onDataUciBuildProgress(processedDataFiles, pendingEntries.length, true);
+      }
+    }
+    const elapsedMs = Date.now() - startedAt;
+    if (createdWhiteFiles > 0 || createdBlackFiles > 0) {
+      this.onNetworkStatus(
+        `Lichess data_uci: created/updated ${createdWhiteFiles} white and ${createdBlackFiles} black monthly files in ${elapsedMs}ms`,
+      );
+      return;
+    }
+    this.onNetworkStatus(`Lichess data_uci: no new files needed (already available) (${elapsedMs}ms)`);
+  }
+
+  private buildSanRecordFromGame(game: LichessUserGame, user: string): { side: Side; line: string } | null {
+    if (!isStandardLichessGame(game)) {
+      return null;
+    }
+
+    const targetUser = user.trim().toLowerCase();
+    const whiteUser = extractPlayerName(game, 'white');
+    const blackUser = extractPlayerName(game, 'black');
+    const side = whiteUser === targetUser ? 'white' : blackUser === targetUser ? 'black' : null;
+    if (!side) {
+      return null;
+    }
+
+    const result = outcomeToWhiteResultChar(gameOutcome(game));
+    if (!result) {
+      return null;
+    }
+
+    let uciMoves: string[] = [];
+    if (game.moves && game.moves.trim() !== '') {
+      const replay = new Chess();
+      for (const moveText of game.moves.trim().split(/\s+/u)) {
+        const move = applyMoveVerbose(replay, moveText);
+        if (!move) {
+          return null;
+        }
+        uciMoves.push(`${move.from}${move.to}${move.promotion ?? ''}`);
+      }
+    } else if (game.pgn && game.pgn.trim() !== '') {
+      const replay = new Chess();
+      try {
+        replay.loadPgn(game.pgn);
+      } catch {
+        return null;
+      }
+      uciMoves = replay.history({ verbose: true }).map((move) => `${move.from}${move.to}${move.promotion ?? ''}`);
+    } else {
+      return null;
+    }
+
+    return {
+      side,
+      line: `${result}|${uciMoves.join(' ')}`,
+    };
   }
 
   private async writeLineToMonthlyFile(
@@ -1291,6 +1693,55 @@ export class LichessClient {
         return minYearMonth === null || yearMonth >= minYearMonth;
       })
       .map((entry) => resolve(dataDirectory, entry.name))
+      .sort((a, b) => basename(a).localeCompare(basename(b)));
+  }
+
+  private async migrateLegacySanDirectory(playerDirectory: string, dataUciDirectory: string): Promise<void> {
+    const legacyDataSanDirectory = resolve(playerDirectory, 'data_san');
+    try {
+      await readdir(legacyDataSanDirectory);
+    } catch (error: unknown) {
+      if (isMissingFileError(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      await readdir(dataUciDirectory);
+      return;
+    } catch (error: unknown) {
+      if (!isMissingFileError(error)) {
+        throw error;
+      }
+    }
+
+    await rename(legacyDataSanDirectory, dataUciDirectory);
+    this.onNetworkStatus('Lichess data_uci: renamed legacy data_san directory to data_uci');
+  }
+
+  private async listMonthlyUciFiles(sideUciDirectory: string, minYearMonth: string | null = null): Promise<string[]> {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(sideUciDirectory, { withFileTypes: true });
+    } catch (error: unknown) {
+      if (isMissingFileError(error)) {
+        return [];
+      }
+      throw error;
+    }
+    return entries
+      .filter((entry) => {
+        if (!entry.isFile()) {
+          return false;
+        }
+        const yearMonth = parseYearMonthFromSanFileName(entry.name);
+        if (yearMonth === null) {
+          return false;
+        }
+        return minYearMonth === null || yearMonth >= minYearMonth;
+      })
+      .map((entry) => resolve(sideUciDirectory, entry.name))
       .sort((a, b) => basename(a).localeCompare(basename(b)));
   }
 

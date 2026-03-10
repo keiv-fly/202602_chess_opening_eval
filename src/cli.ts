@@ -40,6 +40,8 @@ class App {
     undefined,
     (loadedGames, totalGames, done) => this.updateLichessDumpProgress(loadedGames, totalGames, done),
     (request) => this.promptCloudEvalRetryDecision(request),
+    undefined,
+    (processedFiles, totalFiles, done) => this.updateLichessDataUciProgress(processedFiles, totalFiles, done),
   );
   private readonly chessComClient = new ChessComClient(
     fetch,
@@ -47,12 +49,17 @@ class App {
     (message) => this.logStatus(message),
     undefined,
     (loadedFiles, totalFiles, done) => this.updateChessComDumpProgress(loadedFiles, totalFiles, done),
+    (processedFiles, totalFiles, done) => this.updateChessComDataUciProgress(processedFiles, totalFiles, done),
   );
   private readonly history: string[] = [];
   private lichessDumpProgress: cliProgress.SingleBar | null = null;
   private lichessDumpProgressTotal = 0;
+  private lichessDataUciProgress: cliProgress.SingleBar | null = null;
+  private lichessDataUciProgressTotal = 0;
   private chessComDumpProgress: cliProgress.SingleBar | null = null;
   private chessComDumpProgressTotal = 0;
+  private chessComDataUciProgress: cliProgress.SingleBar | null = null;
+  private chessComDataUciProgressTotal = 0;
   private stripLeadingStopKeyOnNextMovePrompt = false;
   private hasFetchedUserGamesForSession = false;
 
@@ -65,7 +72,7 @@ class App {
     const baseFen = initialPosition.baseFen;
     this.history.length = 0;
     this.history.push(...initialPosition.initialHistory);
-    this.hasFetchedUserGamesForSession = false;
+    this.hasFetchedUserGamesForSession = true;
     let fen = initialPosition.currentFen;
     const sideInput = (await rl.question('Side (white/black or w/b): ')).trim().toLowerCase();
     let side: Side;
@@ -87,14 +94,22 @@ class App {
         // Clear any buffered line input captured while "s" was used to stop Lichess retries.
         rl.write('', { ctrl: true, name: 'u' });
       }
-      let action = await rl.question('Move (SAN), c to export CSV, left arrow (←), or Enter to go back: ');
+      let action = await rl.question('Move (SAN), c to export CSV, u to download games, left arrow (←), or Enter to go back: ');
       if (this.stripLeadingStopKeyOnNextMovePrompt && action.toLowerCase().startsWith('s')) {
         action = action.slice(1);
       }
       this.stripLeadingStopKeyOnNextMovePrompt = false;
       const trimmedAction = action.trim();
-      if (trimmedAction.toLowerCase() === 'c') {
+      const normalizedAction = trimmedAction.toLowerCase();
+      if (normalizedAction === 'c') {
         await this.exportRowsToCsv(currentRows, fen, side);
+        continue;
+      }
+      if (normalizedAction === 'u') {
+        this.logLine('Status: User games update requested; syncing from sites now...');
+        this.clearCachedUserMoveStats();
+        this.hasFetchedUserGamesForSession = false;
+        currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
         continue;
       }
 
@@ -145,6 +160,7 @@ class App {
     timeFilter: UserTimeFilter,
   ): Promise<CombinedMoveRow[]> {
     this.logLine('\n' + renderBoard(fen));
+    this.logLine(`FEN: ${fen}`);
     this.logLine(`\nFetching stats for ${side}...`);
     this.logLine(`Time filter: ${timeFilter.label}`);
     const normalizedFen = normalizeFenWithoutMoveCounters(fen);
@@ -157,7 +173,7 @@ class App {
     this.logLine(
       useDownloadedGamesOnly
         ? 'Status: User games mode -> local downloaded games only (no Lichess/Chess.com user-site requests)'
-        : 'Status: User games mode -> first position sync from sites, then local downloaded games',
+        : 'Status: User games mode -> site sync requested; downloading/updating now, then local downloaded games',
     );
 
     this.logLine(
@@ -226,6 +242,11 @@ class App {
         'Status: Chess.com has no matching games for this exact FEN + side + time filter (independent from Lichess retry stop).',
       );
     }
+  }
+
+  private clearCachedUserMoveStats(): void {
+    this.cache.deleteByPrefix('lichess-user:');
+    this.cache.deleteByPrefix('chesscom:');
   }
 
   private parseInitialPosition(input: string): InitialPositionInput {
@@ -476,6 +497,48 @@ class App {
     }
   }
 
+  private updateLichessDataUciProgress(processedFiles: number, totalFiles: number, done: boolean): void {
+    const normalizedTotal = Math.max(0, totalFiles);
+    const normalizedProcessed = Math.max(0, Math.min(processedFiles, normalizedTotal));
+    const progressTotal = Math.max(1, normalizedTotal);
+    const progressProcessed = done ? progressTotal : Math.min(normalizedProcessed, progressTotal);
+    const progressPayload = {
+      displayValue: done ? normalizedTotal : normalizedProcessed,
+      displayTotal: normalizedTotal,
+    };
+
+    if (!this.lichessDataUciProgress) {
+      this.lichessDataUciProgress = new cliProgress.SingleBar(
+        {
+          format:
+            'Status: Lichess data_uci [{bar}] {displayValue}/{displayTotal} ETA {eta_formatted} Elapsed {duration_formatted}',
+          hideCursor: true,
+          clearOnComplete: false,
+          stopOnComplete: false,
+          stream: output,
+          autopadding: true,
+          forceRedraw: true,
+        },
+        cliProgress.Presets.shades_classic,
+      );
+      this.lichessDataUciProgressTotal = progressTotal;
+      this.lichessDataUciProgress.start(progressTotal, progressProcessed, progressPayload);
+    } else {
+      if (progressTotal !== this.lichessDataUciProgressTotal) {
+        this.lichessDataUciProgressTotal = progressTotal;
+        this.lichessDataUciProgress.setTotal(progressTotal);
+      }
+      this.lichessDataUciProgress.update(progressProcessed, progressPayload);
+    }
+
+    if (done && this.lichessDataUciProgress) {
+      this.lichessDataUciProgress.update(progressProcessed, progressPayload);
+      this.lichessDataUciProgress.stop();
+      this.lichessDataUciProgress = null;
+      this.lichessDataUciProgressTotal = 0;
+    }
+  }
+
   private updateChessComDumpProgress(loadedFiles: number, totalFiles: number, done: boolean): void {
     const normalizedTotal = Math.max(0, totalFiles);
     const normalizedLoaded = Math.max(0, Math.min(loadedFiles, normalizedTotal));
@@ -515,6 +578,48 @@ class App {
       this.chessComDumpProgress.stop();
       this.chessComDumpProgress = null;
       this.chessComDumpProgressTotal = 0;
+    }
+  }
+
+  private updateChessComDataUciProgress(processedFiles: number, totalFiles: number, done: boolean): void {
+    const normalizedTotal = Math.max(0, totalFiles);
+    const normalizedProcessed = Math.max(0, Math.min(processedFiles, normalizedTotal));
+    const progressTotal = Math.max(1, normalizedTotal);
+    const progressProcessed = done ? progressTotal : Math.min(normalizedProcessed, progressTotal);
+    const progressPayload = {
+      displayValue: done ? normalizedTotal : normalizedProcessed,
+      displayTotal: normalizedTotal,
+    };
+
+    if (!this.chessComDataUciProgress) {
+      this.chessComDataUciProgress = new cliProgress.SingleBar(
+        {
+          format:
+            'Status: Chess.com data_uci [{bar}] {displayValue}/{displayTotal} ETA {eta_formatted} Elapsed {duration_formatted}',
+          hideCursor: true,
+          clearOnComplete: false,
+          stopOnComplete: false,
+          stream: output,
+          autopadding: true,
+          forceRedraw: true,
+        },
+        cliProgress.Presets.shades_classic,
+      );
+      this.chessComDataUciProgressTotal = progressTotal;
+      this.chessComDataUciProgress.start(progressTotal, progressProcessed, progressPayload);
+    } else {
+      if (progressTotal !== this.chessComDataUciProgressTotal) {
+        this.chessComDataUciProgressTotal = progressTotal;
+        this.chessComDataUciProgress.setTotal(progressTotal);
+      }
+      this.chessComDataUciProgress.update(progressProcessed, progressPayload);
+    }
+
+    if (done && this.chessComDataUciProgress) {
+      this.chessComDataUciProgress.update(progressProcessed, progressPayload);
+      this.chessComDataUciProgress.stop();
+      this.chessComDataUciProgress = null;
+      this.chessComDataUciProgressTotal = 0;
     }
   }
 }
