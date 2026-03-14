@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readBrowserPageCss, renderBrowserPage } from './browserPage.js';
+import { listCards } from './cards.js';
 import { OpeningEvaluator } from './openingEvaluator.js';
 import type { BrowserResultEvent, EvaluatePositionRequest, EvaluatePositionResult, UiEvent } from './types.js';
 
@@ -251,6 +252,16 @@ const server = createServer(async (request, response) => {
 
       const savedCard = await evaluator.saveCard(job.result.fen, body.moveSan);
       writeJson(response, 201, savedCard);
+    } catch (error: unknown) {
+      writeJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
+  if (method === 'GET' && url.pathname === '/api/cards') {
+    try {
+      const cards = await listCards();
+      writeJson(response, 200, { cards });
     } catch (error: unknown) {
       writeJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
     }

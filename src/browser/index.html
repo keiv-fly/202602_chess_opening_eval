@@ -10,8 +10,23 @@
   <input class="theme-toggle" type="radio" name="theme" id="theme-light" checked />
   <input class="theme-toggle" type="radio" name="theme" id="theme-dark" />
 
-  <div class="page">
+  <div class="page is-explorer-view">
     <header class="topbar">
+      <div class="nav-menu">
+        <button class="nav-button" id="nav-button" type="button" aria-label="Open navigation menu" title="Navigation" aria-expanded="false">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 7h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <path d="M4 12h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            <path d="M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+          </svg>
+        </button>
+        <div class="nav-view-title" id="nav-current-view-label" aria-live="polite">Explorer</div>
+        <div class="nav-backdrop" id="nav-backdrop" aria-hidden="true"></div>
+        <div class="nav-popover" id="nav-menu">
+          <button class="nav-option is-active" type="button" data-view="explorer" aria-current="page">Explorer</button>
+          <button class="nav-option" type="button" data-view="cards">Cards</button>
+        </div>
+      </div>
       <div class="settings">
         <input class="settings-toggle" type="checkbox" id="settings-open" />
         <label class="settings-button" for="settings-open" aria-label="Open theme settings" title="Theme settings">
@@ -37,6 +52,18 @@
           The composer below now works like the original CLI: answer each prompt in order, then use SAN moves, `s &lt;SAN move&gt;` to save a card, `c` to export CSV, `u` to refresh user games, or send an empty input to go back one move.
         </div>
       </div>
+      <section class="cards-view" id="cards-view" hidden>
+        <div class="cards-panel">
+          <input
+            class="cards-search-input"
+            id="cards-search-input"
+            type="text"
+            placeholder="Paste FEN to filter the table"
+            autocomplete="off"
+          />
+          <div class="cards-table-mount" id="cards-table-mount"></div>
+        </div>
+      </section>
     </main>
 
     <section class="composer">
@@ -62,10 +89,20 @@
   <script>
     (function () {
       const bootstrap = window.__APP_BOOTSTRAP__ || {};
+      const page = document.querySelector('.page');
       const content = document.getElementById('content');
+      const cardsView = document.getElementById('cards-view');
+      const cardsSearchInput = document.getElementById('cards-search-input');
+      const cardsTableMount = document.getElementById('cards-table-mount');
+      const composer = document.querySelector('.composer');
       const composerForm = document.getElementById('composer-form');
       const composerInput = document.getElementById('composer-input');
       const sendButton = document.getElementById('send-button');
+      const navButton = document.getElementById('nav-button');
+      const navCurrentViewLabel = document.getElementById('nav-current-view-label');
+      const navBackdrop = document.getElementById('nav-backdrop');
+      const navMenu = document.getElementById('nav-menu');
+      const navViewButtons = document.querySelectorAll('[data-view]');
       const settingsToggle = document.getElementById('settings-open');
       const settingsButton = document.querySelector('.settings-button');
       const settingsMenu = document.getElementById('settings-menu');
@@ -74,6 +111,7 @@
       const themeButtons = document.querySelectorAll('[data-theme]');
 
       const state = {
+        activeView: 'explorer',
         phase: null,
         lichessUser: typeof bootstrap.lichessUser === 'string' ? bootstrap.lichessUser : '',
         chessComUser: typeof bootstrap.chessComUser === 'string' ? bootstrap.chessComUser : '',
@@ -87,9 +125,37 @@
         latestResult: null,
         eventSource: null,
         nextPhaseOnError: null,
+        cards: [],
+        cardsLoaded: false,
+        cardsLoading: false,
+        cardsNeedRefresh: true,
+        cardsError: '',
+        cardsSearch: '',
       };
 
-      function closeMenu() {
+      function closeNavMenu() {
+        navButton.setAttribute('aria-expanded', 'false');
+        navBackdrop.classList.remove('is-open');
+        navMenu.classList.remove('is-open');
+      }
+
+      function toggleNavMenu() {
+        const isOpen = navMenu.classList.contains('is-open');
+        if (isOpen) {
+          closeNavMenu();
+          return;
+        }
+        navButton.setAttribute('aria-expanded', 'true');
+        navBackdrop.classList.add('is-open');
+        navMenu.classList.add('is-open');
+      }
+
+      function updateNavButtonLabel() {
+        const viewLabel = state.activeView === 'cards' ? 'Cards' : 'Explorer';
+        navCurrentViewLabel.textContent = viewLabel;
+      }
+
+      function closeSettingsMenu() {
         settingsToggle.checked = false;
       }
 
@@ -101,21 +167,47 @@
           } else {
             themeLight.checked = true;
           }
-          closeMenu();
+          closeSettingsMenu();
+        });
+      });
+
+      navViewButtons.forEach(function (button) {
+        button.addEventListener('click', function () {
+          const view = button.getAttribute('data-view') === 'cards' ? 'cards' : 'explorer';
+          setActiveView(view);
+          closeNavMenu();
         });
       });
 
       document.addEventListener('click', function (event) {
+        const clickedInsideNav = event.target.closest('.nav-menu');
         const clickedInsideSettings = event.target.closest('.settings');
+        if (!clickedInsideNav) {
+          closeNavMenu();
+        }
         if (!clickedInsideSettings) {
-          closeMenu();
+          closeSettingsMenu();
         }
       });
 
       document.addEventListener('keydown', function (event) {
         if (event.key === 'Escape') {
-          closeMenu();
+          closeNavMenu();
+          closeSettingsMenu();
         }
+      });
+
+      navMenu.addEventListener('click', function (event) {
+        event.stopPropagation();
+      });
+
+      navButton.addEventListener('click', function (event) {
+        event.stopPropagation();
+        toggleNavMenu();
+      });
+
+      navBackdrop.addEventListener('click', function () {
+        closeNavMenu();
       });
 
       settingsMenu.addEventListener('click', function (event) {
@@ -142,6 +234,9 @@
       }
 
       function focusComposer() {
+        if (state.activeView !== 'explorer') {
+          return;
+        }
         window.requestAnimationFrame(function () {
           composerInput.focus();
         });
@@ -273,6 +368,14 @@
           return '--.-';
         }
         return formatPercentValue((part / total) * 100);
+      }
+
+      function sigmoid(value) {
+        return 1 / (1 + Math.exp(-value));
+      }
+
+      function formatFixed(value, digits) {
+        return Number.isFinite(value) ? value.toFixed(digits) : '--';
       }
 
       function formatEvalCell(evalValue) {
@@ -532,6 +635,163 @@
         table.appendChild(tbody);
         wrapper.appendChild(table);
         return wrapper;
+      }
+
+      function createCardsTable(cards) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'cards-table-wrap';
+
+        const table = document.createElement('table');
+        table.className = 'cards-table';
+
+        const thead = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        [
+          { label: 'fen', className: 'cards-col-fen' },
+          { label: 'board', className: 'cards-col-board' },
+          { label: 'status', className: 'cards-col-status' },
+          { label: 'x', className: 'cards-col-num' },
+          { label: 'p', className: 'cards-col-num' },
+        ].forEach(function (header) {
+          headRow.appendChild(createTextCell('th', header.label, header.className));
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement('tbody');
+        if (cards.length === 0) {
+          const emptyRow = document.createElement('tr');
+          const emptyCell = createTextCell('td', 'No cards found.', 'cards-table-empty');
+          emptyCell.colSpan = 5;
+          emptyRow.appendChild(emptyCell);
+          tbody.appendChild(emptyRow);
+        }
+
+        cards.forEach(function (card) {
+          const tr = document.createElement('tr');
+          const fenCell = createTextCell('td', card.fen, 'cards-col-fen is-mono');
+          const boardCell = document.createElement('td');
+          boardCell.className = 'cards-col-board';
+          const board = createFenBoard(card.fen);
+
+          if (board) {
+            board.classList.add('is-small');
+            boardCell.appendChild(board);
+          } else {
+            boardCell.textContent = '--';
+          }
+
+          tr.appendChild(fenCell);
+          tr.appendChild(boardCell);
+          tr.appendChild(createTextCell('td', card.status || '--', 'cards-col-status is-mono'));
+          tr.appendChild(createTextCell('td', formatFixed(card.movAvgX, 3), 'cards-col-num is-mono'));
+          tr.appendChild(createTextCell('td', formatFixed(sigmoid(card.movAvgX), 4), 'cards-col-num is-mono'));
+          tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        wrapper.appendChild(table);
+        return wrapper;
+      }
+
+      function getFilteredCards() {
+        const search = state.cardsSearch.trim().toLowerCase();
+        if (search === '') {
+          return state.cards.slice();
+        }
+        return state.cards.filter(function (card) {
+          return String(card.fen || '').toLowerCase().includes(search);
+        });
+      }
+
+      function renderCardsView() {
+        const filteredCards = getFilteredCards();
+        cardsTableMount.innerHTML = '';
+
+        if (state.cardsError) {
+          cardsTableMount.appendChild(createTextCell('div', state.cardsError, 'cards-feedback is-error'));
+          return;
+        }
+
+        if (state.cardsLoading && state.cards.length === 0) {
+          cardsTableMount.appendChild(createTextCell('div', 'Loading saved cards...', 'cards-feedback'));
+          return;
+        }
+
+        cardsTableMount.appendChild(createCardsTable(filteredCards));
+      }
+
+      async function getJson(url) {
+        const response = await fetch(url);
+
+        let payload = null;
+        try {
+          payload = await response.json();
+        } catch (error) {
+          payload = null;
+        }
+
+        if (!response.ok) {
+          const message = payload && payload.error ? payload.error : 'Request failed.';
+          throw new Error(message);
+        }
+
+        return payload;
+      }
+
+      async function loadCards(forceRefresh) {
+        if (state.cardsLoading) {
+          return;
+        }
+        if (state.cardsLoaded && !state.cardsNeedRefresh && !forceRefresh) {
+          renderCardsView();
+          return;
+        }
+
+        state.cardsLoading = true;
+        state.cardsError = '';
+        renderCardsView();
+
+        try {
+          const payload = await getJson('/api/cards');
+          state.cards = Array.isArray(payload.cards) ? payload.cards : [];
+          state.cardsLoaded = true;
+          state.cardsNeedRefresh = false;
+        } catch (error) {
+          state.cardsError = error instanceof Error ? error.message : String(error);
+        } finally {
+          state.cardsLoading = false;
+          renderCardsView();
+        }
+      }
+
+      function setActiveView(view) {
+        state.activeView = view === 'cards' ? 'cards' : 'explorer';
+        updateNavButtonLabel();
+        page.classList.toggle('is-explorer-view', state.activeView === 'explorer');
+        page.classList.toggle('is-cards-view', state.activeView === 'cards');
+        content.hidden = state.activeView !== 'explorer';
+        cardsView.hidden = state.activeView !== 'cards';
+        composer.hidden = state.activeView !== 'explorer';
+
+        navViewButtons.forEach(function (button) {
+          const isActive = button.getAttribute('data-view') === state.activeView;
+          button.classList.toggle('is-active', isActive);
+          if (isActive) {
+            button.setAttribute('aria-current', 'page');
+          } else {
+            button.removeAttribute('aria-current');
+          }
+        });
+
+        if (state.activeView === 'cards') {
+          state.cardsSearch = cardsSearchInput.value;
+          renderCardsView();
+          void loadCards(false);
+          return;
+        }
+
+        focusComposer();
       }
 
       function createAssistantCycle(options) {
@@ -1052,6 +1312,7 @@
                     payload.zobr64 +
                     ']',
                 );
+                state.cardsNeedRefresh = true;
                 promptCurrentPhase();
               })
               .catch(function (error) {
@@ -1098,8 +1359,15 @@
         }
       });
 
+      cardsSearchInput.addEventListener('input', function () {
+        state.cardsSearch = cardsSearchInput.value;
+        renderCardsView();
+      });
+
       setBusy(false);
       composerInput.value = '';
+      cardsSearchInput.value = '';
+      state.cardsSearch = '';
 
       if (state.lichessUser) {
         appendAssistantNote('Using Lichess username from environment: ' + state.lichessUser);
@@ -1108,6 +1376,7 @@
         appendAssistantNote('Using Chess.com username from environment: ' + state.chessComUser);
       }
 
+      setActiveView('explorer');
       setPhase(determineInitialPhase());
       promptCurrentPhase();
     })();

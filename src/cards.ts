@@ -33,11 +33,27 @@ export type SavedCard = {
   status: 'new';
 };
 
+export type StoredCard = {
+  fen: string;
+  zobr64: string;
+  user: string;
+  moveUci: string;
+  status: 'new' | 'learning' | 'stop';
+  movAvgX: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type SaveCardOptions = {
   rootDir?: string;
   localUser?: string;
   promptText?: string | null;
   revealText?: string | null;
+};
+
+export type ListCardsOptions = {
+  rootDir?: string;
+  localUser?: string;
 };
 
 const CARDS_SCHEMA_SQL = `
@@ -194,6 +210,48 @@ export async function saveCardForPosition(fen: string, moveSan: string, options:
       throw new Error(`Card already exists for user "${user}" at this position.`);
     }
     throw error;
+  } finally {
+    database.close();
+  }
+}
+
+export async function listCards(options: ListCardsOptions = {}): Promise<StoredCard[]> {
+  const user = (options.localUser ?? process.env.LOCAL_USER ?? '').trim();
+  if (user === '') {
+    throw new Error('LOCAL_USER is required to load cards.');
+  }
+
+  const { database } = await openCardsDatabase(options.rootDir ?? process.cwd());
+
+  try {
+    const rows = database
+      .prepare(`
+        SELECT fen, zobr64, user, move_uci, status, mov_avg_x, created_at, updated_at
+        FROM cards
+        WHERE user = ?
+        ORDER BY updated_at DESC, id DESC
+      `)
+      .all(user) as Array<{
+      fen: string;
+      zobr64: string;
+      user: string;
+      move_uci: string;
+      status: 'new' | 'learning' | 'stop';
+      mov_avg_x: number;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      fen: row.fen,
+      zobr64: row.zobr64,
+      user: row.user,
+      moveUci: row.move_uci,
+      status: row.status,
+      movAvgX: row.mov_avg_x,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
   } finally {
     database.close();
   }

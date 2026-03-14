@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
-import { saveCardForPosition } from '../src/cards.js';
+import { listCards, saveCardForPosition } from '../src/cards.js';
 import { STARTING_FEN } from '../src/workflow.js';
 
 async function withTempRoot(run: (rootDir: string) => Promise<void>): Promise<void> {
@@ -80,6 +80,51 @@ describe('saveCardForPosition', () => {
           localUser: 'tester',
         }),
       ).rejects.toThrow('Card already exists for user "tester" at this position.');
+    });
+  });
+});
+
+describe('listCards', () => {
+  it('returns saved cards for the requested user with mov_avg_x exposed as movAvgX', async () => {
+    await withTempRoot(async (rootDir) => {
+      const savedCard = await saveCardForPosition(STARTING_FEN, 'e4', {
+        rootDir,
+        localUser: 'tester',
+      });
+
+      const databasePath = path.join(rootDir, 'cards_db', 'cards.sqlite');
+      const database = new Database(databasePath);
+      try {
+        database
+          .prepare(
+            `
+              UPDATE cards
+              SET mov_avg_x = ?, status = ?, updated_at = '2026-03-14 12:00:00'
+              WHERE user = ? AND fen = ?
+            `,
+          )
+          .run(2.75, 'learning', 'tester', STARTING_FEN);
+      } finally {
+        database.close();
+      }
+
+      const cards = await listCards({
+        rootDir,
+        localUser: 'tester',
+      });
+
+      expect(cards).toEqual([
+        {
+          fen: STARTING_FEN,
+          zobr64: savedCard.zobr64,
+          user: 'tester',
+          moveUci: 'e2e4',
+          status: 'learning',
+          movAvgX: 2.75,
+          createdAt: expect.any(String),
+          updatedAt: '2026-03-14 12:00:00',
+        },
+      ]);
     });
   });
 });
