@@ -231,6 +231,32 @@ const server = createServer(async (request, response) => {
     return;
   }
 
+  if (method === 'POST' && url.pathname === '/api/cards') {
+    try {
+      const body = await readJsonBody<{ jobId?: string; moveSan?: string }>(request);
+      if (!body.jobId) {
+        writeJson(response, 400, { error: 'jobId is required.' });
+        return;
+      }
+      if (typeof body.moveSan !== 'string' || body.moveSan.trim() === '') {
+        writeJson(response, 400, { error: 'moveSan is required.' });
+        return;
+      }
+
+      const job = jobs.get(body.jobId);
+      if (!job || !job.result) {
+        writeJson(response, 404, { error: 'Completed job result not found.' });
+        return;
+      }
+
+      const savedCard = await evaluator.saveCard(job.result.fen, body.moveSan);
+      writeJson(response, 201, savedCard);
+    } catch (error: unknown) {
+      writeJson(response, 400, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return;
+  }
+
   const eventsMatch = /^\/api\/jobs\/([^/]+)\/events$/u.exec(url.pathname);
   if (method === 'GET' && eventsMatch) {
     handleSse(request, response, decodeURIComponent(eventsMatch[1]));

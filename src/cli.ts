@@ -43,8 +43,10 @@ class App {
         // Clear any buffered line input captured while "s" was used to stop Lichess retries.
         rl.write('', { ctrl: true, name: 'u' });
       }
-      let action = await rl.question('Move (SAN), c to export CSV, u to download games, left arrow (←), or Enter to go back: ');
-      if (this.stripLeadingStopKeyOnNextMovePrompt && action.toLowerCase().startsWith('s')) {
+      let action = await rl.question(
+        'Move (SAN), s <SAN move> to save a card, c to export CSV, u to download games, left arrow (←), or Enter to go back: ',
+      );
+      if (this.stripLeadingStopKeyOnNextMovePrompt && /^s(?=\S)/iu.test(action)) {
         action = action.slice(1);
       }
       this.stripLeadingStopKeyOnNextMovePrompt = false;
@@ -56,6 +58,15 @@ class App {
       }
       if (normalizedAction === 'u') {
         currentRows = await this.evaluateCurrentPosition(true);
+        continue;
+      }
+      if (normalizedAction === 's') {
+        this.logLine('Use "s <SAN move>" to save a card.');
+        continue;
+      }
+      const saveCardMatch = /^s\s+(.+)$/iu.exec(trimmedAction);
+      if (saveCardMatch) {
+        await this.saveCurrentPositionAsCard(saveCardMatch[1]);
         continue;
       }
 
@@ -122,6 +133,18 @@ class App {
     }
     const filePath = await this.evaluator.exportRowsToCsv(rows, resolvedPosition.fen, this.side);
     this.logLine(`CSV exported: ${filePath}`);
+  }
+
+  private async saveCurrentPositionAsCard(moveSan: string): Promise<void> {
+    const resolvedPosition = resolvePositionFromHistory(this.initialPosition, this.history);
+    if (!resolvedPosition) {
+      throw new Error('Failed to resolve position from base FEN and history.');
+    }
+
+    const savedCard = await this.evaluator.saveCard(resolvedPosition.fen, moveSan);
+    this.logLine(
+      `Card saved for ${savedCard.user}: ${savedCard.moveSan} (${savedCard.moveUci}) at ${savedCard.fen} [${savedCard.zobr64}]`,
+    );
   }
 
   private handleProgress(update: ProgressUpdate): void {

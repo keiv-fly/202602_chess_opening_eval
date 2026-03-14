@@ -4,6 +4,7 @@ import { LichessClient } from './api/lichess.js';
 import { ChessComClient } from './api/chesscom.js';
 import { renderBoard } from './board.js';
 import { SessionCache } from './cache.js';
+import { saveCardForPosition, type SavedCard } from './cards.js';
 import { mergeStats, renderStatsCsv, renderStatsTable } from './evaluator.js';
 import { normalizeFenWithoutMoveCounters } from './fen.js';
 import type {
@@ -199,6 +200,10 @@ export class OpeningEvaluator {
     await mkdir(outputDir, { recursive: true });
     await writeFile(filePath, csv, 'utf8');
     return filePath;
+  }
+
+  async saveCard(fen: string, moveSan: string): Promise<SavedCard> {
+    return saveCardForPosition(fen, moveSan);
   }
 
   private logSourceTotals(

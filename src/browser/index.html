@@ -34,7 +34,7 @@
           This browser UI renders the board from FEN, shows merged statistics as an HTML table, and streams backend logs and progress in real time.
         </div>
         <div class="message-assistant">
-          The composer below now works like the original CLI: answer each prompt in order, then use SAN moves, `c` to export CSV, `u` to refresh user games, or send an empty input to go back one move.
+          The composer below now works like the original CLI: answer each prompt in order, then use SAN moves, `s &lt;SAN move&gt;` to save a card, `c` to export CSV, `u` to refresh user games, or send an empty input to go back one move.
         </div>
       </div>
     </main>
@@ -129,6 +129,15 @@
       function scrollToLatest() {
         window.requestAnimationFrame(function () {
           window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        });
+      }
+
+      function scrollToResultCard(card) {
+        if (!card) {
+          return;
+        }
+        window.requestAnimationFrame(function () {
+          card.scrollIntoView({ behavior: 'smooth', block: 'start' });
         });
       }
 
@@ -592,7 +601,7 @@
             composerInput.placeholder = 'ISO date/time, YYYY-MM, YYYY, or blank for all-time';
             break;
           case 'action':
-            composerInput.placeholder = 'SAN move, c, u, or send empty input to go back';
+            composerInput.placeholder = 'SAN move, s <SAN move>, c, u, or send empty input to go back';
             break;
           default:
             composerInput.placeholder = 'Type a message...';
@@ -619,7 +628,9 @@
         } else if (state.phase === 'timeFilter') {
           appendAssistantNote('Time filter (ISO date/time, YYYY-MM, YYYY; Enter for all):');
         } else if (state.phase === 'action') {
-          appendAssistantNote('Move (SAN), c to export CSV, u to download games, or send empty input to go back:');
+          appendAssistantNote(
+            'Move (SAN), s <SAN move> to save a card, c to export CSV, u to download games, or send empty input to go back:',
+          );
         }
 
         focusComposer();
@@ -745,6 +756,7 @@
         state.history = Array.isArray(result.history) ? result.history.slice() : [];
         state.preferDownloadedUserGames = Boolean(result.userGamesPrimed);
         state.latestResult = result;
+        scrollToResultCard(cycle.results);
       }
 
       async function postJson(url, body) {
@@ -812,6 +824,9 @@
           setBusy(false);
           if (state.phase === 'action') {
             promptCurrentPhase();
+            if (!cycle.results.hidden) {
+              scrollToResultCard(cycle.results);
+            }
           } else if (state.nextPhaseOnError) {
             setPhase(state.nextPhaseOnError);
             promptCurrentPhase();
@@ -968,6 +983,7 @@
 
         if (state.phase === 'action') {
           const normalized = trimmed.toLowerCase();
+          const saveCardMatch = /^s\s+(.+)$/iu.exec(trimmed);
 
           if (normalized === 'c') {
             appendUserMessage(trimmed);
@@ -981,6 +997,47 @@
             postJson('/api/export', { jobId: state.latestJobId })
               .then(function (payload) {
                 appendAssistantNote('CSV exported: ' + payload.path);
+                promptCurrentPhase();
+              })
+              .catch(function (error) {
+                appendAssistantNote(error instanceof Error ? error.message : String(error), true);
+                promptCurrentPhase();
+              });
+            return;
+          }
+
+          if (normalized === 's') {
+            appendUserMessage(trimmed);
+            composerInput.value = '';
+            appendAssistantNote('Use "s <SAN move>" to save a card.', true);
+            promptCurrentPhase();
+            return;
+          }
+
+          if (saveCardMatch) {
+            appendUserMessage(trimmed);
+            composerInput.value = '';
+            if (!state.latestJobId || !state.latestResult) {
+              appendAssistantNote('Run an evaluation before saving a card.', true);
+              promptCurrentPhase();
+              return;
+            }
+
+            postJson('/api/cards', { jobId: state.latestJobId, moveSan: saveCardMatch[1] })
+              .then(function (payload) {
+                appendAssistantNote(
+                  'Card saved for ' +
+                    payload.user +
+                    ': ' +
+                    payload.moveSan +
+                    ' (' +
+                    payload.moveUci +
+                    ') at ' +
+                    payload.fen +
+                    ' [' +
+                    payload.zobr64 +
+                    ']',
+                );
                 promptCurrentPhase();
               })
               .catch(function (error) {

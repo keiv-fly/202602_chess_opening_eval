@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renderBrowserPage } from '../src/browserPage.js';
+import { readBrowserPageCss, renderBrowserPage } from '../src/browserPage.js';
 
 describe('browserPage', () => {
   it('escapes regex backslashes inside the inline script', () => {
@@ -47,6 +47,20 @@ describe('browserPage', () => {
     expect(html).not.toContain('result.boardText');
   });
 
+  it('scrolls the finished evaluation to the top of the result card', () => {
+    const html = renderBrowserPage({
+      lichessUser: 'lichess-user',
+      chessComUser: 'chesscom-user',
+    });
+    const css = readBrowserPageCss();
+
+    expect(html).toContain('function scrollToResultCard(card)');
+    expect(html).toContain("card.scrollIntoView({ behavior: 'smooth', block: 'start' });");
+    expect(html).toContain('scrollToResultCard(cycle.results);');
+    expect(html).toContain("if (!cycle.results.hidden) {");
+    expect(css).toContain('scroll-margin-top: 20px;');
+  });
+
   it('formats counts with visible group spaces', () => {
     const html = renderBrowserPage({
       lichessUser: 'lichess-user',
@@ -55,5 +69,16 @@ describe('browserPage', () => {
 
     expect(html).toContain('function appendGroupedCount(container, total, abbreviateThousands)');
     expect(html).toContain("separator.className = 'group-space';");
+  });
+
+  it('mentions the save-card command in the action prompt', () => {
+    const html = renderBrowserPage({
+      lichessUser: 'lichess-user',
+      chessComUser: 'chesscom-user',
+    });
+
+    expect(html).toContain('s &lt;SAN move&gt;');
+    expect(html).toContain('Use "s <SAN move>" to save a card.');
+    expect(html).toContain("postJson('/api/cards'");
   });
 });
