@@ -45,4 +45,14 @@ describe('browserPage', () => {
     expect(html).toContain("table.className = 'stats-table';");
     expect(html).not.toContain("tablePre.textContent = normalizeTerminalText(result.tableText);");
   });
+
+  it('formats counts with visible group spaces', () => {
+    const html = renderBrowserPage({
+      lichessUser: 'lichess-user',
+      chessComUser: 'chesscom-user',
+    });
+
+    expect(html).toContain('function appendGroupedCount(container, total, abbreviateThousands)');
+    expect(html).toContain("separator.className = 'group-space';");
+  });
 });

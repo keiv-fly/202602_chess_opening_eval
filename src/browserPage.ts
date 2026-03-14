@@ -460,6 +460,11 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
       white-space: pre-wrap;
     }
 
+    .group-space {
+      display: inline-block;
+      width: 0.4ch;
+    }
+
     .stats-table-empty {
       color: var(--muted);
       text-align: center;
@@ -855,11 +860,33 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         return Math.abs(potential) < 0.05 ? 0 : potential;
       }
 
-      function formatMoveCount(total, abbreviateThousands) {
-        if (!abbreviateThousands) {
-          return String(total);
+      function buildGroupedCountParts(total, abbreviateThousands) {
+        const normalizedValue = abbreviateThousands ? Math.floor(total / 1000) : total;
+        const digits = String(normalizedValue);
+        const groups = [];
+        for (let index = digits.length; index > 0; index -= 3) {
+          groups.unshift(digits.slice(Math.max(0, index - 3), index));
         }
-        return String(Math.floor(total / 1000)) + 'k';
+        return {
+          groups: groups,
+          suffix: abbreviateThousands ? 'k' : '',
+        };
+      }
+
+      function appendGroupedCount(container, total, abbreviateThousands) {
+        const parts = buildGroupedCountParts(total, abbreviateThousands);
+        parts.groups.forEach(function (group, index) {
+          if (index > 0) {
+            const separator = document.createElement('span');
+            separator.className = 'group-space';
+            separator.textContent = ' ';
+            container.appendChild(separator);
+          }
+          container.appendChild(document.createTextNode(group));
+        });
+        if (parts.suffix) {
+          container.appendChild(document.createTextNode(parts.suffix));
+        }
       }
 
       function createTextCell(tagName, text, className) {
@@ -884,7 +911,8 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
 
         const main = document.createElement('div');
         main.className = 'stats-cell-main';
-        main.textContent = formatMoveCount(stats.total, abbreviateThousands) + '/' + formatPercent(stats.total, columnTotal) + '%';
+        appendGroupedCount(main, stats.total, abbreviateThousands);
+        main.appendChild(document.createTextNode('/' + formatPercent(stats.total, columnTotal) + '%'));
 
         const split = document.createElement('div');
         split.className = 'stats-cell-sub';
