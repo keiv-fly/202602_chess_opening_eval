@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Board</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #ffffff;
+      font-family: Arial, sans-serif;
+    }
+
+    .board {
+      width: 480px;
+      height: 480px;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      grid-template-rows: repeat(8, 1fr);
+      border: 1px solid #333;
+    }
+
+    .square {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .light { background: #f0d9b5; }
+    .dark  { background: #b58863; }
+
+    .square img {
+      width: 88%;
+      height: 88%;
+      object-fit: contain;
+      user-select: none;
+      pointer-events: none;
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Lichess-like coordinates */
+    .coord-file,
+    .coord-rank {
+      position: absolute;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      user-select: none;
+      pointer-events: none;
+      z-index: 3;
+      letter-spacing: 0;
+    }
+
+    .coord-file {
+      left: 4px;
+      bottom: 3px;
+    }
+
+    .coord-rank {
+      top: 3px;
+      right: 4px;
+    }
+
+    /* opposite-square coloring like lichess */
+    .light > .coord-file,
+    .light > .coord-rank {
+      color: #b58863;
+    }
+
+    .dark > .coord-file,
+    .dark > .coord-rank {
+      color: #f0d9b5;
+    }
+  </style>
+</head>
+<body>
+  <div class="board">
+    <!-- 8 -->
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/f/ff/Chess_rdt45.svg" alt="black rook"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/e/ef/Chess_ndt45.svg" alt="black knight"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/9/98/Chess_bdt45.svg" alt="black bishop"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/47/Chess_qdt45.svg" alt="black queen"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/f/f0/Chess_kdt45.svg" alt="black king"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/9/98/Chess_bdt45.svg" alt="black bishop"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/e/ef/Chess_ndt45.svg" alt="black knight"></div>
+    <div class="square dark">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/f/ff/Chess_rdt45.svg" alt="black rook">
+      <span class="coord-rank">8</span>
+    </div>
+
+    <!-- 7 -->
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn">
+      <span class="coord-rank">7</span>
+    </div>
+
+    <!-- 6 -->
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"><span class="coord-rank">6</span></div>
+
+    <!-- 5 -->
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"><span class="coord-rank">5</span></div>
+
+    <!-- 4 -->
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"><span class="coord-rank">4</span></div>
+
+    <!-- 3 -->
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"><span class="coord-rank">3</span></div>
+
+    <!-- 2 -->
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn">
+      <span class="coord-rank">2</span>
+    </div>
+
+    <!-- 1 -->
+    <div class="square dark">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/7/72/Chess_rlt45.svg" alt="white rook">
+      <span class="coord-file">a</span>
+    </div>
+    <div class="square light">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/7/70/Chess_nlt45.svg" alt="white knight">
+      <span class="coord-file">b</span>
+    </div>
+    <div class="square dark">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/b/b1/Chess_blt45.svg" alt="white bishop">
+      <span class="coord-file">c</span>
+    </div>
+    <div class="square light">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/1/15/Chess_qlt45.svg" alt="white queen">
+      <span class="coord-file">d</span>
+    </div>
+    <div class="square dark">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/4/42/Chess_klt45.svg" alt="white king">
+      <span class="coord-file">e</span>
+    </div>
+    <div class="square light">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/b/b1/Chess_blt45.svg" alt="white bishop">
+      <span class="coord-file">f</span>
+    </div>
+    <div class="square dark">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/7/70/Chess_nlt45.svg" alt="white knight">
+      <span class="coord-file">g</span>
+    </div>
+    <div class="square light">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/7/72/Chess_rlt45.svg" alt="white rook">
+      <span class="coord-file">h</span>
+      <span class="coord-rank">1</span>
+    </div>
+  </div>
+</body>
+</html>
