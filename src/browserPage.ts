@@ -788,18 +788,6 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         return null;
       }
 
-      function renderSessionLine(result) {
-        const details = [
-          'Lichess user: ' + state.lichessUser,
-          'Chess.com user: ' + state.chessComUser,
-          'Initial position: ' + (state.initialPosition.trim() || 'start position'),
-          'History: ' + (result.history.length > 0 ? result.history.join(' ') : '(none)'),
-          'Side filter: ' + result.side,
-          'Time filter: ' + result.timeFilterLabel,
-        ];
-        return details.join(' | ');
-      }
-
       function renderProgressItem(cycle, update) {
         const container = cycle.progress;
         if (!cycle.progressMounted) {
@@ -859,26 +847,6 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
           cycle.progressMounted = false;
         }
 
-        const sessionLabel = document.createElement('div');
-        sessionLabel.className = 'section-label';
-        sessionLabel.textContent = 'Session';
-
-        const sessionLine = document.createElement('div');
-        sessionLine.className = 'result-meta';
-        sessionLine.textContent = renderSessionLine(result);
-
-        const summaryLabel = document.createElement('div');
-        summaryLabel.className = 'section-label';
-        summaryLabel.textContent = 'Result';
-
-        const meta = document.createElement('div');
-        meta.className = 'result-meta';
-        meta.textContent =
-          'Filter side: ' + result.side +
-          ' | Position turn: ' + result.positionTurn +
-          ' | Time filter: ' + result.timeFilterLabel +
-          ' | Moves in history: ' + String(result.history.length);
-
         const fenLabel = document.createElement('div');
         fenLabel.className = 'section-label';
         fenLabel.textContent = 'FEN';
@@ -903,10 +871,6 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         tablePre.className = 'mono-output';
         tablePre.textContent = normalizeTerminalText(result.tableText);
 
-        cycle.results.appendChild(sessionLabel);
-        cycle.results.appendChild(sessionLine);
-        cycle.results.appendChild(summaryLabel);
-        cycle.results.appendChild(meta);
         cycle.results.appendChild(fenLabel);
         cycle.results.appendChild(fenLine);
         cycle.results.appendChild(boardLabel);
