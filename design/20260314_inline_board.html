@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chess Board</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #ffffff;
+      font-family: sans-serif;
+    }
+
+    .board {
+      width: 480px;
+      height: 480px;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      grid-template-rows: repeat(8, 1fr);
+      border: 1px solid #333;
+    }
+
+    .square {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .light { background: #f0d9b5; }
+    .dark  { background: #b58863; }
+
+    .square img {
+      width: 88%;
+      height: 88%;
+      object-fit: contain;
+      user-select: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="board">
+    <!-- 8 -->
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/f/ff/Chess_rdt45.svg" alt="black rook"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/e/ef/Chess_ndt45.svg" alt="black knight"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/9/98/Chess_bdt45.svg" alt="black bishop"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/47/Chess_qdt45.svg" alt="black queen"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/f/f0/Chess_kdt45.svg" alt="black king"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/9/98/Chess_bdt45.svg" alt="black bishop"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/e/ef/Chess_ndt45.svg" alt="black knight"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/f/ff/Chess_rdt45.svg" alt="black rook"></div>
+
+    <!-- 7 -->
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/c/c7/Chess_pdt45.svg" alt="black pawn"></div>
+
+    <!-- 6 -->
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+
+    <!-- 5 -->
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+
+    <!-- 4 -->
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+
+    <!-- 3 -->
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+    <div class="square dark"></div>
+    <div class="square light"></div>
+
+    <!-- 2 -->
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/45/Chess_plt45.svg" alt="white pawn"></div>
+
+    <!-- 1 -->
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/7/72/Chess_rlt45.svg" alt="white rook"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/7/70/Chess_nlt45.svg" alt="white knight"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/b/b1/Chess_blt45.svg" alt="white bishop"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/1/15/Chess_qlt45.svg" alt="white queen"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/4/42/Chess_klt45.svg" alt="white king"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/b/b1/Chess_blt45.svg" alt="white bishop"></div>
+    <div class="square dark"><img src="https://upload.wikimedia.org/wikipedia/commons/7/70/Chess_nlt45.svg" alt="white knight"></div>
+    <div class="square light"><img src="https://upload.wikimedia.org/wikipedia/commons/7/72/Chess_rlt45.svg" alt="white rook"></div>
+  </div>
+</body>
+</html>
