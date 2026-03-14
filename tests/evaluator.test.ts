@@ -78,6 +78,25 @@ describe('evaluator', () => {
     expect(table).toContain('403048k/50%');
   });
 
+  it('can render a plain-text table without ANSI escape sequences', () => {
+    const table = renderStatsTable(
+      [
+        {
+          san: 'e4',
+          eval: { cp: 34, depth: 25 },
+          lichessUser: { san: 'e4', total: 10, white: 6, draws: 2, black: 2 },
+          chessComUser: { san: 'e4', total: 8, white: 5, draws: 1, black: 2 },
+          lichessDb: { san: 'e4', total: 100, white: 50, draws: 20, black: 30 },
+        },
+      ],
+      { enableColors: false },
+    );
+
+    expect(table).not.toContain('\u001b[');
+    expect(table).toContain('e4');
+    expect(table).toContain('0.34/25|53.1');
+  });
+
   it('renders flattened CSV columns for export', () => {
     const csv = renderStatsCsv(
       [

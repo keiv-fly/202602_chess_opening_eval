@@ -1,57 +1,22 @@
-import { Chess } from 'chess.js';
 import cliProgress from 'cli-progress';
 import * as dotenv from 'dotenv';
-import { mkdir, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { renderBoard } from './board.js';
-import { SessionCache } from './cache.js';
-import { LichessClient } from './api/lichess.js';
-import { ChessComClient } from './api/chesscom.js';
-import { mergeStats, renderStatsCsv, renderStatsTable } from './evaluator.js';
-import { normalizeFenWithoutMoveCounters } from './fen.js';
-import type { CombinedMoveRow, MoveStats, Side } from './types.js';
+import { OpeningEvaluator } from './openingEvaluator.js';
+import { parseSideInput, resolvePositionFromHistory } from './workflow.js';
+import type { CloudEvalRetryPromptRequest, CombinedMoveRow, ProgressUpdate, Side } from './types.js';
 
 dotenv.config();
 
-const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-
-type UserTimeFilter = {
-  sinceTimestampMs: number | null;
-  cacheKey: string;
-  label: string;
-};
-
-type InitialPositionInput = {
-  baseFen: string;
-  currentFen: string;
-  initialHistory: string[];
-};
-
 class App {
-  private readonly cache = new SessionCache();
-  private readonly lichessClient = new LichessClient(
-    fetch,
-    undefined,
-    (message) => this.logStatus(message),
-    undefined,
-    undefined,
-    undefined,
-    (loadedGames, totalGames, done) => this.updateLichessDumpProgress(loadedGames, totalGames, done),
-    (request) => this.promptCloudEvalRetryDecision(request),
-    undefined,
-    (processedFiles, totalFiles, done) => this.updateLichessDataUciProgress(processedFiles, totalFiles, done),
-  );
-  private readonly chessComClient = new ChessComClient(
-    fetch,
-    undefined,
-    (message) => this.logStatus(message),
-    undefined,
-    (loadedFiles, totalFiles, done) => this.updateChessComDumpProgress(loadedFiles, totalFiles, done),
-    (processedFiles, totalFiles, done) => this.updateChessComDataUciProgress(processedFiles, totalFiles, done),
-  );
-  private readonly history: string[] = [];
+  private readonly evaluator = new OpeningEvaluator();
+  private initialPosition = '';
+  private history: string[] = [];
+  private lichessUser = '';
+  private chessComUser = '';
+  private side: Side = 'white';
+  private timeFilter = '';
+  private preferDownloadedUserGames = true;
   private lichessDumpProgress: cliProgress.SingleBar | null = null;
   private lichessDumpProgressTotal = 0;
   private lichessDataUciProgress: cliProgress.SingleBar | null = null;
@@ -61,33 +26,17 @@ class App {
   private chessComDataUciProgress: cliProgress.SingleBar | null = null;
   private chessComDataUciProgressTotal = 0;
   private stripLeadingStopKeyOnNextMovePrompt = false;
-  private hasFetchedUserGamesForSession = false;
 
   async run(): Promise<void> {
     const rl = readline.createInterface({ input, output });
-    const lichessUser = process.env.LICHESS_USER || (await rl.question('Lichess username: '));
-    const chessComUser = process.env.CHESSCOM_USER || (await rl.question('Chess.com username: '));
+    this.lichessUser = process.env.LICHESS_USER || (await rl.question('Lichess username: '));
+    this.chessComUser = process.env.CHESSCOM_USER || (await rl.question('Chess.com username: '));
+    this.initialPosition = await rl.question('FEN (or SAN moves from start): ');
+    this.history = [];
+    this.side = parseSideInput(await rl.question('Side (white/black or w/b): '));
+    this.timeFilter = await rl.question('Time filter (ISO date/time, YYYY-MM, YYYY; Enter for all): ');
 
-    const initialPosition = this.parseInitialPosition(await rl.question('FEN (or SAN moves from start): '));
-    const baseFen = initialPosition.baseFen;
-    this.history.length = 0;
-    this.history.push(...initialPosition.initialHistory);
-    this.hasFetchedUserGamesForSession = true;
-    let fen = initialPosition.currentFen;
-    const sideInput = (await rl.question('Side (white/black or w/b): ')).trim().toLowerCase();
-    let side: Side;
-    if (sideInput === 'white' || sideInput === 'w') {
-      side = 'white';
-    } else if (sideInput === 'black' || sideInput === 'b') {
-      side = 'black';
-    } else {
-      throw new Error('Side must be white/black or w/b.');
-    }
-
-    const timeFilterInput = await rl.question('Time filter (ISO date/time, YYYY-MM, YYYY; Enter for all): ');
-    const timeFilter = this.parseUserTimeFilter(timeFilterInput);
-
-    let currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
+    let currentRows = await this.evaluateCurrentPosition();
 
     for (;;) {
       if (this.stripLeadingStopKeyOnNextMovePrompt) {
@@ -102,18 +51,14 @@ class App {
       const trimmedAction = action.trim();
       const normalizedAction = trimmedAction.toLowerCase();
       if (normalizedAction === 'c') {
-        await this.exportRowsToCsv(currentRows, fen, side);
+        await this.exportRowsToCsv(currentRows);
         continue;
       }
       if (normalizedAction === 'u') {
-        this.logLine('Status: User games update requested; syncing from sites now...');
-        this.clearCachedUserMoveStats();
-        this.hasFetchedUserGamesForSession = false;
-        currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
+        currentRows = await this.evaluateCurrentPosition(true);
         continue;
       }
 
-      let attemptedMove: string | null = null;
       if (trimmedAction === '') {
         if (this.history.length === 0) {
           this.logLine('No history yet.');
@@ -127,310 +72,84 @@ class App {
         }
         this.history.pop();
       } else {
-        attemptedMove = trimmedAction;
-        this.history.push(trimmedAction);
-      }
-
-      let resolvedPosition = this.resolvePositionFromHistory(baseFen, this.history);
-      if (!resolvedPosition) {
-        if (attemptedMove !== null) {
-          this.history.pop();
-          this.logLine(`Invalid move: ${attemptedMove}`);
-        } else {
-          this.logLine('Invalid move in history. Resetting history.');
-          this.history.length = 0;
+        const attemptedHistory = [...this.history, trimmedAction];
+        if (!resolvePositionFromHistory(this.initialPosition, attemptedHistory)) {
+          this.logLine(`Invalid move: ${trimmedAction}`);
+          continue;
         }
-        resolvedPosition = this.resolvePositionFromHistory(baseFen, this.history);
+        this.history = attemptedHistory;
       }
 
-      if (!resolvedPosition) {
-        throw new Error('Failed to resolve position from base FEN and history.');
-      }
-
-      fen = resolvedPosition.fen;
-      currentRows = await this.evaluatePosition(fen, side, lichessUser, chessComUser, timeFilter);
+      currentRows = await this.evaluateCurrentPosition();
     }
   }
 
-  private async evaluatePosition(
-    fen: string,
-    side: Side,
-    lichessUser: string,
-    chessComUser: string,
-    timeFilter: UserTimeFilter,
-  ): Promise<CombinedMoveRow[]> {
-    this.logLine('\n' + renderBoard(fen));
-    this.logLine(`FEN: ${fen}`);
-    this.logLine(`\nFetching stats for ${side}...`);
-    this.logLine(`Time filter: ${timeFilter.label}`);
-    const normalizedFen = normalizeFenWithoutMoveCounters(fen);
-
-    const lichessUserKey = `lichess-user:${lichessUser}:${side}:${timeFilter.cacheKey}:${normalizedFen}`;
-    const lichessDbKey = `lichess-db:${normalizedFen}`;
-    const chessComKey = `chesscom:${chessComUser}:${side}:${timeFilter.cacheKey}:${normalizedFen}`;
-    const useDownloadedGamesOnly = this.hasFetchedUserGamesForSession;
-
-    this.logLine(
-      useDownloadedGamesOnly
-        ? 'Status: User games mode -> local downloaded games only (no Lichess/Chess.com user-site requests)'
-        : 'Status: User games mode -> site sync requested; downloading/updating now, then local downloaded games',
+  private async evaluateCurrentPosition(forceRefreshUserGames = false): Promise<CombinedMoveRow[]> {
+    const result = await this.evaluator.evaluate(
+      {
+        lichessUser: this.lichessUser,
+        chessComUser: this.chessComUser,
+        initialPosition: this.initialPosition,
+        history: this.history,
+        side: this.side,
+        timeFilter: this.timeFilter,
+        forceRefreshUserGames,
+        preferDownloadedUserGames: this.preferDownloadedUserGames,
+      },
+      {
+        ansiOutput: true,
+        onLog: (message) => {
+          if (message.includes('Cloud eval: stop requested by keypress')) {
+            this.stripLeadingStopKeyOnNextMovePrompt = true;
+          }
+          this.logLine(message);
+        },
+        onProgress: (update) => this.handleProgress(update),
+        onRetryPrompt: (request) => this.promptCloudEvalRetryDecision(request),
+      },
     );
 
-    this.logLine(
-      useDownloadedGamesOnly ? 'Status: Lichess user local read started' : 'Status: Lichess user request started',
-    );
-    const lichessUserStats = await this.cache.getOrSet(lichessUserKey, () =>
-      useDownloadedGamesOnly
-        ? this.lichessClient.getUserMoveStatsFromDownloadedGames(lichessUser, normalizedFen, side, timeFilter.sinceTimestampMs)
-        : this.lichessClient.getUserMoveStats(lichessUser, normalizedFen, side, timeFilter.sinceTimestampMs),
-    );
-    this.logLine(
-      useDownloadedGamesOnly ? 'Status: Lichess user local read finished' : 'Status: Lichess user request finished',
-    );
-
-    this.logLine('Status: Lichess DB request started');
-    const lichessDbPromise = this.cache.getOrSet(lichessDbKey, () => this.lichessClient.getDatabaseMoveStats(normalizedFen));
-
-    this.logLine(
-      useDownloadedGamesOnly ? 'Status: Chess.com user local read started' : 'Status: Chess.com user request started',
-    );
-    const chessComPromise = this.cache.getOrSet(chessComKey, () =>
-      useDownloadedGamesOnly
-        ? this.chessComClient.getUserMoveStatsFromDownloadedGames(
-            chessComUser,
-            normalizedFen,
-            side,
-            timeFilter.sinceTimestampMs,
-          )
-        : this.chessComClient.getUserMoveStats(chessComUser, normalizedFen, side, timeFilter.sinceTimestampMs),
-    );
-
-    const [lichessDbStats, chessComStats] = await Promise.all([lichessDbPromise, chessComPromise]);
-    this.logLine('Status: Lichess DB request finished');
-    this.logLine(
-      useDownloadedGamesOnly ? 'Status: Chess.com user local read finished' : 'Status: Chess.com user request finished',
-    );
-    if (!useDownloadedGamesOnly) {
-      this.hasFetchedUserGamesForSession = true;
-      this.logLine('Status: User games cache primed for this session; next positions use local files only.');
-    }
-
-    this.logSourceTotals(lichessUserStats, chessComStats, lichessDbStats);
-
-    const rows = mergeStats(lichessUserStats, chessComStats, lichessDbStats);
-    this.logLine('\n' + renderStatsTable(rows));
-    return rows;
+    this.initialPosition = result.baseFen;
+    this.history = [...result.history];
+    this.preferDownloadedUserGames = result.userGamesPrimed;
+    return result.rows;
   }
 
-  private logSourceTotals(
-    lichessUserStats: MoveStats[],
-    chessComStats: MoveStats[],
-    lichessDbStats: Array<MoveStats & { eval?: unknown }>,
-  ): void {
-    const lichessUserGames = lichessUserStats.reduce((sum, row) => sum + row.total, 0);
-    const chessComGames = chessComStats.reduce((sum, row) => sum + row.total, 0);
-    const lichessDbGames = lichessDbStats.reduce((sum, row) => sum + row.total, 0);
-
-    this.logLine(
-      `Status: Source matches -> Lichess user ${lichessUserGames} games (${lichessUserStats.length} moves), ` +
-        `Chess.com user ${chessComGames} games (${chessComStats.length} moves), ` +
-        `Lichess DB ${lichessDbGames} games (${lichessDbStats.length} moves)`,
-    );
-
-    if (chessComGames === 0) {
-      this.logLine(
-        'Status: Chess.com has no matching games for this exact FEN + side + time filter (independent from Lichess retry stop).',
-      );
+  private async exportRowsToCsv(rows: CombinedMoveRow[]): Promise<void> {
+    const resolvedPosition = resolvePositionFromHistory(this.initialPosition, this.history);
+    if (!resolvedPosition) {
+      throw new Error('Failed to resolve position from base FEN and history.');
     }
-  }
-
-  private clearCachedUserMoveStats(): void {
-    this.cache.deleteByPrefix('lichess-user:');
-    this.cache.deleteByPrefix('chesscom:');
-  }
-
-  private parseInitialPosition(input: string): InitialPositionInput {
-    const trimmedInput = input.trim();
-    if (trimmedInput === '') {
-      return {
-        baseFen: STARTING_FEN,
-        currentFen: STARTING_FEN,
-        initialHistory: [],
-      };
-    }
-
-    const fenCandidate = new Chess();
-    try {
-      fenCandidate.load(trimmedInput);
-      const normalizedFen = fenCandidate.fen();
-      return {
-        baseFen: normalizedFen,
-        currentFen: normalizedFen,
-        initialHistory: [],
-      };
-    } catch {
-      // Try SAN parsing below.
-    }
-
-    const sanPosition = new Chess();
-    const rawTokens = trimmedInput.replaceAll(',', ' ').split(/\s+/u);
-    const initialHistory: string[] = [];
-    let parsedAnyMove = false;
-
-    for (const rawToken of rawTokens) {
-      const san = this.normalizeInitialSanToken(rawToken);
-      if (!san) {
-        continue;
-      }
-      if (san === '1-0' || san === '0-1' || san === '1/2-1/2' || san === '*') {
-        break;
-      }
-
-      const result = sanPosition.move(san, { strict: false });
-      if (!result) {
-        throw new Error('Position input must be a valid FEN or SAN moves from starting position.');
-      }
-      initialHistory.push(result.san);
-      parsedAnyMove = true;
-    }
-
-    if (!parsedAnyMove) {
-      throw new Error('Position input must be a valid FEN or SAN moves from starting position.');
-    }
-    return {
-      baseFen: STARTING_FEN,
-      currentFen: sanPosition.fen(),
-      initialHistory,
-    };
-  }
-
-  private resolvePositionFromHistory(baseFen: string, history: string[]): { fen: string; side: Side } | null {
-    const chess = new Chess();
-    chess.load(baseFen);
-    for (const move of history) {
-      let result: ReturnType<Chess['move']>;
-      try {
-        result = chess.move(move, { strict: false });
-      } catch {
-        return null;
-      }
-      if (!result) {
-        return null;
-      }
-    }
-    return {
-      fen: chess.fen(),
-      side: chess.turn() === 'w' ? 'white' : 'black',
-    };
-  }
-
-  private normalizeInitialSanToken(token: string): string | null {
-    const trimmedToken = token.trim();
-    if (trimmedToken === '') {
-      return null;
-    }
-    if (/^\d+\.(?:\.\.)?$/u.test(trimmedToken)) {
-      return null;
-    }
-
-    const tokenWithoutMoveNumber = trimmedToken.replace(/^\d+\.(?:\.\.)?/u, '').replace(/^\.\.\./u, '');
-    if (tokenWithoutMoveNumber === '') {
-      return null;
-    }
-
-    const tokenWithoutAnnotations = tokenWithoutMoveNumber.replace(/[!?]+$/u, '');
-    if (tokenWithoutAnnotations === '') {
-      return null;
-    }
-    return tokenWithoutAnnotations;
-  }
-
-  private parseUserTimeFilter(input: string): UserTimeFilter {
-    const trimmed = input.trim();
-    if (trimmed === '') {
-      return {
-        sinceTimestampMs: null,
-        cacheKey: 'all-time',
-        label: 'all-time',
-      };
-    }
-
-    const yearMatch = /^(\d{4})$/u.exec(trimmed);
-    if (yearMatch) {
-      const year = Number.parseInt(yearMatch[1], 10);
-      const sinceTimestampMs = Date.UTC(year, 0, 1, 0, 0, 0, 0);
-      return {
-        sinceTimestampMs,
-        cacheKey: `since-${sinceTimestampMs}`,
-        label: `since ${new Date(sinceTimestampMs).toISOString()} (${trimmed} => Jan 1)`,
-      };
-    }
-
-    const yearMonthMatch = /^(\d{4})-(\d{2})$/u.exec(trimmed);
-    if (yearMonthMatch) {
-      const year = Number.parseInt(yearMonthMatch[1], 10);
-      const month = Number.parseInt(yearMonthMatch[2], 10);
-      if (month < 1 || month > 12) {
-        throw new Error('Time filter month must be in 01..12.');
-      }
-      const sinceTimestampMs = Date.UTC(year, month - 1, 1, 0, 0, 0, 0);
-      return {
-        sinceTimestampMs,
-        cacheKey: `since-${sinceTimestampMs}`,
-        label: `since ${new Date(sinceTimestampMs).toISOString()} (${trimmed} => 1st day of month)`,
-      };
-    }
-
-    if (!/^\d{4}-\d{2}-\d{2}(?:[Tt ].*)?$/u.test(trimmed)) {
-      throw new Error('Time filter must be ISO date/time, YYYY-MM, or YYYY.');
-    }
-
-    const parsedTimestamp = Date.parse(trimmed);
-    if (Number.isNaN(parsedTimestamp)) {
-      throw new Error('Time filter must be ISO date/time, YYYY-MM, or YYYY.');
-    }
-
-    return {
-      sinceTimestampMs: parsedTimestamp,
-      cacheKey: `since-${parsedTimestamp}`,
-      label: `since ${new Date(parsedTimestamp).toISOString()}`,
-    };
-  }
-
-  private async exportRowsToCsv(rows: CombinedMoveRow[], fen: string, side: Side): Promise<void> {
-    const timestamp = this.formatTimestamp(new Date());
-    const outputDir = path.join(process.cwd(), 'data_out');
-    const filePath = path.join(outputDir, `${timestamp}.csv`);
-    const csv = renderStatsCsv(rows, { fen, side });
-
-    await mkdir(outputDir, { recursive: true });
-    await writeFile(filePath, csv, 'utf8');
+    const filePath = await this.evaluator.exportRowsToCsv(rows, resolvedPosition.fen, this.side);
     this.logLine(`CSV exported: ${filePath}`);
   }
 
-  private formatTimestamp(date: Date): string {
-    const pad2 = (value: number): string => String(value).padStart(2, '0');
-    return `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}_${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`;
-  }
-
-  private logStatus(message: string): void {
-    if (message.includes('Cloud eval: stop requested by keypress')) {
-      this.stripLeadingStopKeyOnNextMovePrompt = true;
+  private handleProgress(update: ProgressUpdate): void {
+    switch (update.key) {
+      case 'lichess-user-dump':
+        this.updateLichessDumpProgress(update.current, update.total, update.done);
+        break;
+      case 'lichess-data-uci':
+        this.updateLichessDataUciProgress(update.current, update.total, update.done);
+        break;
+      case 'chesscom-user-dump':
+        this.updateChessComDumpProgress(update.current, update.total, update.done);
+        break;
+      case 'chesscom-data-uci':
+        this.updateChessComDataUciProgress(update.current, update.total, update.done);
+        break;
+      default:
+        break;
     }
-    const formatted = `Status: ${message}`;
-    this.logLine(formatted);
   }
 
   private logLine(message: string): void {
     console.log(message);
   }
 
-  private async promptCloudEvalRetryDecision(request: {
-    requestDescription: string;
-    retryIndex: number;
-    maxRetries: number;
-    waitSeconds: number;
-  }): Promise<'continue-retries' | 'use-cached-values'> {
+  private async promptCloudEvalRetryDecision(
+    request: CloudEvalRetryPromptRequest,
+  ): Promise<'continue-retries' | 'use-cached-values'> {
     this.logLine(
       `Status: Cloud eval retry needed (${request.retryIndex}/${request.maxRetries}, wait ~${request.waitSeconds}s): ${request.requestDescription}`,
     );

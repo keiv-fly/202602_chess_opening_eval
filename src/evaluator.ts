@@ -6,6 +6,10 @@ export type CsvExportContext = {
   side: Side;
 };
 
+export type RenderStatsTableOptions = {
+  enableColors?: boolean;
+};
+
 const SOURCE_SUFFIXES = [
   'total',
   'share_percent',
@@ -172,7 +176,8 @@ function combineUserStatsForRow(row: CombinedMoveRow): MoveStats | undefined {
   };
 }
 
-export function renderStatsTable(rows: CombinedMoveRow[]): string {
+export function renderStatsTable(rows: CombinedMoveRow[], options: RenderStatsTableOptions = {}): string {
+  const enableColors = options.enableColors !== false;
   const maxLichessUser = Math.max(0, ...rows.map((r) => r.lichessUser?.total ?? 0));
   const maxChessCom = Math.max(0, ...rows.map((r) => r.chessComUser?.total ?? 0));
   const userStats = rows.map((row) => combineUserStatsForRow(row));
@@ -203,6 +208,7 @@ export function renderStatsTable(rows: CombinedMoveRow[]): string {
     head: ['Move', 'Eval', 'Lichess user', 'Chess.com user', 'User', 'Lichess DB', 'Pot.'],
     colAligns: ['left', 'right', 'left', 'left', 'right', 'left', 'right'],
     wordWrap: true,
+    style: enableColors ? undefined : { head: [], border: [] },
   });
 
   for (const [index, row] of rows.entries()) {
