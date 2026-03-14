@@ -31,7 +31,7 @@
     <main class="content-wrap">
       <div class="content" id="content">
         <div class="message-assistant assistant-intro">
-          This browser UI keeps the board as plain text, renders merged statistics as an HTML table, and streams backend logs and progress in real time.
+          This browser UI renders the board from FEN, shows merged statistics as an HTML table, and streams backend logs and progress in real time.
         </div>
         <div class="message-assistant">
           The composer below now works like the original CLI: answer each prompt in order, then use SAN moves, `c` to export CSV, `u` to refresh user games, or send an empty input to go back one move.
@@ -175,6 +175,67 @@
 
       function normalizeTerminalText(text) {
         return stripAnsi(text).replace(/\r/g, '');
+      }
+
+      const PIECE_NAMES = {
+        p: 'pawn',
+        r: 'rook',
+        n: 'knight',
+        b: 'bishop',
+        q: 'queen',
+        k: 'king',
+      };
+      const PIECE_SVG_PREFIX = 'https://commons.wikimedia.org/wiki/Special:FilePath/Chess_';
+
+      function createFenBoard(fen) {
+        const boardFen = String(fen || '').trim().split(/\s+/, 1)[0];
+        const ranks = boardFen ? boardFen.split('/') : [];
+        if (ranks.length !== 8) {
+          return null;
+        }
+
+        let html = '';
+        for (let row = 0; row < 8; row += 1) {
+          let file = 0;
+          for (const symbol of ranks[row]) {
+            const empty = symbol.charCodeAt(0) - 48;
+            if (empty >= 1 && empty <= 8) {
+              for (let count = 0; count < empty; count += 1, file += 1) {
+                html += '<div class="fen-square ' + ((row + file) % 2 === 0 ? 'light' : 'dark') + '"></div>';
+              }
+              continue;
+            }
+
+            const lower = symbol.toLowerCase();
+            const pieceName = PIECE_NAMES[lower];
+            if (!pieceName || file >= 8) {
+              return null;
+            }
+            html +=
+              '<div class="fen-square ' +
+              ((row + file) % 2 === 0 ? 'light' : 'dark') +
+              '"><img class="fen-piece" alt="' +
+              (symbol === lower ? 'black ' : 'white ') +
+              pieceName +
+              '" src="' +
+              PIECE_SVG_PREFIX +
+              lower +
+              (symbol === lower ? 'd' : 'l') +
+              't45.svg" decoding="async"></div>';
+            file += 1;
+          }
+
+          if (file !== 8) {
+            return null;
+          }
+        }
+
+        const board = document.createElement('div');
+        board.className = 'fen-board';
+        board.setAttribute('role', 'img');
+        board.setAttribute('aria-label', 'Board for FEN ' + fen);
+        board.innerHTML = html;
+        return board;
       }
 
       const LICHESS_CP_TO_WIN_PROBABILITY_K = 0.00368208;
@@ -661,9 +722,11 @@
         boardLabel.className = 'section-label';
         boardLabel.textContent = 'Board';
 
-        const boardPre = document.createElement('pre');
-        boardPre.className = 'mono-output is-board';
-        boardPre.textContent = normalizeTerminalText(result.boardText);
+        const boardView = createFenBoard(result.fen) || document.createElement('pre');
+        if (boardView.tagName === 'PRE') {
+          boardView.className = 'mono-output is-board';
+          boardView.textContent = normalizeTerminalText(result.boardText);
+        }
 
         const tableLabel = document.createElement('div');
         tableLabel.className = 'section-label';
@@ -674,13 +737,13 @@
         cycle.results.appendChild(fenLabel);
         cycle.results.appendChild(fenLine);
         cycle.results.appendChild(boardLabel);
-        cycle.results.appendChild(boardPre);
+        cycle.results.appendChild(boardView);
         cycle.results.appendChild(tableLabel);
         cycle.results.appendChild(tableView);
 
         if (cycle.showCompletionState) {
           cycle.title.textContent = 'Evaluation complete';
-          cycle.status.textContent = 'Board rendered from backend text; statistics rendered as an HTML table.';
+          cycle.status.textContent = 'Board rendered from FEN; statistics rendered as an HTML table.';
         }
 
         state.history = Array.isArray(result.history) ? result.history.slice() : [];

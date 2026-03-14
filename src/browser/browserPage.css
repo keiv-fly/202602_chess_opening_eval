@@ -341,6 +341,40 @@
       overflow-x: visible;
     }
 
+    .fen-board {
+      width: min(100%, 320px);
+      aspect-ratio: 1;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      grid-template-rows: repeat(8, 1fr);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: #000;
+    }
+
+    .fen-square {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .fen-square.light {
+      background: #f0d9b5;
+    }
+
+    .fen-square.dark {
+      background: #b58863;
+    }
+
+    .fen-piece {
+      width: 88%;
+      height: 88%;
+      object-fit: contain;
+      user-select: none;
+      pointer-events: none;
+    }
+
     .stats-table-wrap {
       width: 100%;
       overflow-x: auto;
