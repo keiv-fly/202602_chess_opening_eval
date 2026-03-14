@@ -44,6 +44,7 @@ describe('browserPage', () => {
     expect(html).toContain("function createMergedStatsTable(rows)");
     expect(html).toContain("table.className = 'stats-table';");
     expect(html).not.toContain("tablePre.textContent = normalizeTerminalText(result.tableText);");
+    expect(html).not.toContain('result.boardText');
   });
 
   it('formats counts with visible group spaces', () => {

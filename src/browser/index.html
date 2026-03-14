@@ -722,11 +722,7 @@
         boardLabel.className = 'section-label';
         boardLabel.textContent = 'Board';
 
-        const boardView = createFenBoard(result.fen) || document.createElement('pre');
-        if (boardView.tagName === 'PRE') {
-          boardView.className = 'mono-output is-board';
-          boardView.textContent = normalizeTerminalText(result.boardText);
-        }
+        const boardView = createFenBoard(result.fen) || createTextCell('div', 'Unable to render board from FEN.', 'fen-line');
 
         const tableLabel = document.createElement('div');
         tableLabel.className = 'section-label';

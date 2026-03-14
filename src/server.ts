@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readBrowserPageCss, renderBrowserPage } from './browserPage.js';
 import { OpeningEvaluator } from './openingEvaluator.js';
-import type { EvaluatePositionRequest, EvaluatePositionResult, UiEvent } from './types.js';
+import type { BrowserResultEvent, EvaluatePositionRequest, EvaluatePositionResult, UiEvent } from './types.js';
 
 dotenv.config();
 
@@ -127,7 +127,8 @@ async function runJob(job: JobRecord, request: EvaluatePositionRequest): Promise
     });
 
     job.result = result;
-    broadcastJobEvent(job, { type: 'result', ...result });
+    const { boardText: _boardText, ...browserResult } = result;
+    broadcastJobEvent(job, { type: 'result', ...browserResult } satisfies BrowserResultEvent);
     broadcastJobEvent(job, { type: 'done' });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);

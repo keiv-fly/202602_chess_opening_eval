@@ -78,21 +78,22 @@ export type EvaluatePositionResult = {
   userGamesPrimed: boolean;
 };
 
+export type BrowserResultEvent = {
+  type: 'result';
+  baseFen: string;
+  fen: string;
+  side: Side;
+  positionTurn: Side;
+  tableText: string;
+  rows: CombinedMoveRow[];
+  history: string[];
+  timeFilterLabel: string;
+  userGamesPrimed: boolean;
+};
+
 export type UiEvent =
   | { type: 'log'; message: string }
   | { type: 'progress'; key: string; label: string; current: number; total: number; done: boolean }
-  | {
-      type: 'result';
-      baseFen: string;
-      fen: string;
-      side: Side;
-      positionTurn: Side;
-      boardText: string;
-      tableText: string;
-      rows: CombinedMoveRow[];
-      history: string[];
-      timeFilterLabel: string;
-      userGamesPrimed: boolean;
-    }
+  | BrowserResultEvent
   | { type: 'error'; message: string }
   | { type: 'done' };
