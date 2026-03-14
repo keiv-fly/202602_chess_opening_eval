@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Explorer</title>
+  <style>
+    :root {
+      --bg: #f2f2f2;
+      --panel: #ffffff;
+      --text: #1f1f1f;
+      --muted: #6b7280;
+      --border: #d7dbe2;
+      --accent: #2563eb;
+      --btn: #f8fafc;
+      --btn-hover: #eef2ff;
+      --board-light: #e7d7b7;
+      --board-dark: #b58863;
+      --shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 920px;
+      margin: 0 auto;
+      min-height: 100vh;
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+      box-shadow: var(--shadow);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 18px 20px 10px;
+      border-bottom: 1px solid #eceff3;
+    }
+
+    .back-btn {
+      width: 42px;
+      height: 42px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      background: transparent;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #374151;
+    }
+
+    .back-btn:hover {
+      background: #f3f4f6;
+      border-color: #e5e7eb;
+    }
+
+    .back-btn svg {
+      width: 28px;
+      height: 28px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 2rem;
+      font-weight: 600;
+      letter-spacing: 0.2px;
+    }
+
+    .content {
+      padding: 16px 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .board-block {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .analysis-lines {
+      font-size: 1.05rem;
+      line-height: 1.45;
+      color: #111827;
+      padding: 0 2px;
+    }
+
+    .analysis-line {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .score {
+      font-weight: 700;
+      min-width: 52px;
+    }
+
+    .score.good { color: #111827; }
+
+    .board-wrap {
+      width: 100%;
+      max-width: 700px;
+      aspect-ratio: 1 / 1;
+      border: 1px solid #d1d5db;
+      overflow: hidden;
+      position: relative;
+      background: #000;
+    }
+
+    .board {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      grid-template-rows: repeat(8, 1fr);
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+
+    .square {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+    }
+
+    .light { background: var(--board-light); }
+    .dark { background: var(--board-dark); }
+
+    .piece {
+      font-size: clamp(30px, 6vw, 56px);
+      line-height: 1;
+      filter: drop-shadow(0 1px 1px rgba(0,0,0,0.25));
+      z-index: 2;
+    }
+
+    .coord {
+      position: absolute;
+      font-size: 0.78rem;
+      color: rgba(0,0,0,0.45);
+      font-weight: 700;
+      z-index: 1;
+    }
+
+    .coord.file { left: 4px; bottom: 3px; }
+    .coord.rank { right: 5px; top: 3px; }
+
+    .arrow {
+      position: absolute;
+      width: 10%;
+      border-radius: 999px;
+      opacity: 0.42;
+      transform-origin: center center;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    .arrow::after {
+      content: "";
+      position: absolute;
+      right: -10px;
+      top: 50%;
+      transform: translateY(-50%);
+      border-left: 18px solid currentColor;
+      border-top: 12px solid transparent;
+      border-bottom: 12px solid transparent;
+    }
+
+    .arrow.gray {
+      color: #6b6258;
+      background: currentColor;
+      left: 34.5%;
+      bottom: 20%;
+      height: 24%;
+      transform: rotate(-90deg);
+    }
+
+    .arrow.blue {
+      color: #6075a3;
+      background: currentColor;
+      left: 47%;
+      bottom: 20%;
+      height: 24%;
+      transform: rotate(-90deg);
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .controls button {
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--btn);
+      font-size: 0.96rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .controls button:hover {
+      background: var(--btn-hover);
+      border-color: #c7d2fe;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #f8fafc;
+      text-align: left;
+      font-size: 0.92rem;
+      color: #374151;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    tbody td {
+      padding: 11px 14px;
+      border-bottom: 1px solid #edf0f4;
+      font-size: 0.95rem;
+      vertical-align: middle;
+    }
+
+    tbody tr:hover {
+      background: #fafcff;
+    }
+
+    .num { font-variant-numeric: tabular-nums; }
+    .positive { color: #0f766e; font-weight: 600; }
+    .negative { color: #b91c1c; font-weight: 600; }
+    .neutral { color: #475569; font-weight: 600; }
+
+    .logs {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #0f172a;
+      color: #e5e7eb;
+      padding: 12px;
+      height: 220px;
+      overflow: auto;
+    }
+
+    .logs h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      color: #cbd5e1;
+    }
+
+    .log-entry {
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.04);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9rem;
+      line-height: 1.45;
+    }
+
+    .log-entry .tag {
+      display: inline-block;
+      margin-right: 8px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      background: rgba(255,255,255,0.1);
+      color: #bfdbfe;
+    }
+
+    .log-entry.success .tag { color: #86efac; }
+    .log-entry.warn .tag { color: #fde68a; }
+    .log-entry.error .tag { color: #fca5a5; }
+
+    .log-entry p {
+      margin: 6px 0 0;
+    }
+
+    .log-entry code {
+      color: #c4b5fd;
+    }
+
+    @media (max-width: 640px) {
+      .topbar {
+        padding: 14px 14px 8px;
+      }
+
+      .content {
+        padding: 12px 14px 20px;
+      }
+
+      h1 {
+        font-size: 1.7rem;
+      }
+
+      .controls button {
+        flex: 1 1 calc(50% - 10px);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="topbar">
+      <button class="back-btn" aria-label="Back">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M15 18l-6-6 6-6"></path>
+        </svg>
+      </button>
+      <h1>Explorer</h1>
+    </div>
+
+    <div class="content">
+      <section class="board-block">
+        <div class="analysis-lines">
+          <div class="analysis-line"><span class="score good">+0.2</span><span>1. e4 e5 2. ♘f3 ♞c6 3. ♗c4 ♞f6 4. d3 ♝c5 5. O-O d6</span></div>
+          <div class="analysis-line"><span class="score good">+0.1</span><span>1. d4 ♞f6 2. ♘f3 e6 3. c4 d5 4. ♘c3 ♝b4 5. ♕a4+ ♞c6</span></div>
+        </div>
+
+        <div class="board-wrap" aria-label="Lichess board mockup">
+          <div class="board">
+            <div class="arrow gray"></div>
+            <div class="arrow blue"></div>
+
+            <div class="square light"><span class="piece">♜</span></div>
+            <div class="square dark"><span class="piece">♞</span></div>
+            <div class="square light"><span class="piece">♝</span></div>
+            <div class="square dark"><span class="piece">♛</span></div>
+            <div class="square light"><span class="piece">♚</span></div>
+            <div class="square dark"><span class="piece">♝</span></div>
+            <div class="square light"><span class="piece">♞</span></div>
+            <div class="square dark"><span class="piece">♜</span><span class="coord rank">8</span></div>
+
+            <div class="square dark"><span class="piece">♟</span></div>
+            <div class="square light"><span class="piece">♟</span></div>
+            <div class="square dark"><span class="piece">♟</span></div>
+            <div class="square light"><span class="piece">♟</span></div>
+            <div class="square dark"><span class="piece">♟</span></div>
+            <div class="square light"><span class="piece">♟</span></div>
+            <div class="square dark"><span class="piece">♟</span></div>
+            <div class="square light"><span class="piece">♟</span><span class="coord rank">7</span></div>
+
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"><span class="coord rank">6</span></div>
+
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"><span class="coord rank">5</span></div>
+
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"><span class="coord rank">4</span></div>
+
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"></div>
+            <div class="square dark"></div>
+            <div class="square light"><span class="coord rank">3</span></div>
+
+            <div class="square light"><span class="piece">♙</span></div>
+            <div class="square dark"><span class="piece">♙</span></div>
+            <div class="square light"><span class="piece">♙</span></div>
+            <div class="square dark"><span class="piece">♙</span></div>
+            <div class="square light"><span class="piece">♙</span></div>
+            <div class="square dark"><span class="piece">♙</span></div>
+            <div class="square light"><span class="piece">♙</span></div>
+            <div class="square dark"><span class="piece">♙</span><span class="coord rank">2</span></div>
+
+            <div class="square dark"><span class="piece">♖</span><span class="coord file">a</span></div>
+            <div class="square light"><span class="piece">♘</span><span class="coord file">b</span></div>
+            <div class="square dark"><span class="piece">♗</span><span class="coord file">c</span></div>
+            <div class="square light"><span class="piece">♕</span><span class="coord file">d</span></div>
+            <div class="square dark"><span class="piece">♔</span><span class="coord file">e</span></div>
+            <div class="square light"><span class="piece">♗</span><span class="coord file">f</span></div>
+            <div class="square dark"><span class="piece">♘</span><span class="coord file">g</span></div>
+            <div class="square light"><span class="piece">♖</span><span class="coord file">h</span><span class="coord rank">1</span></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="controls">
+        <button type="button">Back</button>
+        <button type="button">Enter move</button>
+        <button type="button">Update games</button>
+        <button type="button">Save as CSV</button>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Move</th>
+              <th>Eval</th>
+              <th>User lichess</th>
+              <th>User chess.com</th>
+              <th>Lichess DB</th>
+              <th>Pot.</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1. e4</td><td class="positive num">+0.20</td><td class="num">42%</td><td class="num">39%</td><td class="num">1,248,440</td><td class="num">78</td></tr>
+            <tr><td>1. d4</td><td class="positive num">+0.12</td><td class="num">31%</td><td class="num">33%</td><td class="num">1,104,220</td><td class="num">74</td></tr>
+            <tr><td>1. Nf3</td><td class="neutral num">+0.08</td><td class="num">14%</td><td class="num">16%</td><td class="num">522,880</td><td class="num">61</td></tr>
+            <tr><td>1. c4</td><td class="neutral num">+0.09</td><td class="num">8%</td><td class="num">7%</td><td class="num">468,004</td><td class="num">59</td></tr>
+            <tr><td>1. g3</td><td class="neutral num">+0.03</td><td class="num">3%</td><td class="num">2%</td><td class="num">74,221</td><td class="num">43</td></tr>
+            <tr><td>1. b3</td><td class="neutral num">+0.01</td><td class="num">1.8%</td><td class="num">1.5%</td><td class="num">43,110</td><td class="num">37</td></tr>
+            <tr><td>1. f4</td><td class="negative num">-0.10</td><td class="num">2.2%</td><td class="num">2.0%</td><td class="num">81,440</td><td class="num">31</td></tr>
+            <tr><td>1. Nc3</td><td class="neutral num">+0.02</td><td class="num">1.4%</td><td class="num">1.1%</td><td class="num">38,554</td><td class="num">28</td></tr>
+            <tr><td>1. e3</td><td class="negative num">-0.05</td><td class="num">0.9%</td><td class="num">0.7%</td><td class="num">25,880</td><td class="num">22</td></tr>
+            <tr><td>1. d3</td><td class="negative num">-0.07</td><td class="num">0.8%</td><td class="num">0.8%</td><td class="num">24,912</td><td class="num">21</td></tr>
+            <tr><td>1. b4</td><td class="negative num">-0.20</td><td class="num">0.5%</td><td class="num">0.4%</td><td class="num">11,332</td><td class="num">18</td></tr>
+            <tr><td>1. a3</td><td class="negative num">-0.28</td><td class="num">0.3%</td><td class="num">0.2%</td><td class="num">7,144</td><td class="num">14</td></tr>
+            <tr><td>1. h3</td><td class="negative num">-0.25</td><td class="num">0.4%</td><td class="num">0.3%</td><td class="num">8,003</td><td class="num">15</td></tr>
+            <tr><td>1. a4</td><td class="negative num">-0.32</td><td class="num">0.2%</td><td class="num">0.2%</td><td class="num">5,028</td><td class="num">12</td></tr>
+            <tr><td>1. h4</td><td class="negative num">-0.30</td><td class="num">0.2%</td><td class="num">0.1%</td><td class="num">4,911</td><td class="num">11</td></tr>
+            <tr><td>1. f3</td><td class="negative num">-0.65</td><td class="num">0.1%</td><td class="num">0.1%</td><td class="num">2,144</td><td class="num">6</td></tr>
+            <tr><td>1. g4</td><td class="negative num">-0.82</td><td class="num">0.1%</td><td class="num">0.1%</td><td class="num">1,982</td><td class="num">4</td></tr>
+            <tr><td>1. Na3</td><td class="negative num">-0.44</td><td class="num">0.05%</td><td class="num">0.03%</td><td class="num">1,145</td><td class="num">7</td></tr>
+            <tr><td>1. Nh3</td><td class="negative num">-0.43</td><td class="num">0.05%</td><td class="num">0.03%</td><td class="num">1,121</td><td class="num">7</td></tr>
+            <tr><td>1. c3</td><td class="negative num">-0.11</td><td class="num">0.6%</td><td class="num">0.5%</td><td class="num">16,400</td><td class="num">19</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="logs">
+        <h2>Logs</h2>
+        <div class="log-entry success">
+          <span class="tag">INFO</span>
+          Explorer initialized for position <code>startpos</code>.
+          <p><strong>Rendered:</strong> board, controls, table, and log panel.</p>
+        </div>
+        <div class="log-entry">
+          <span class="tag">QUERY</span>
+          Fetching move candidates from local opening cache.
+          <p><em>Source:</em> <code>lichess_opening_stats.json</code></p>
+        </div>
+        <div class="log-entry warn">
+          <span class="tag">WARN</span>
+          No recent chess.com user sample found for move <code>1. Na3</code>.
+          <p>Fallback percentage was estimated from sparse data.</p>
+        </div>
+        <div class="log-entry success">
+          <span class="tag">OK</span>
+          Saved latest table snapshot to memory.
+          <p>Rows written: <strong>20</strong></p>
+        </div>
+        <div class="log-entry error">
+          <span class="tag">ERROR</span>
+          CSV export skipped because no file path was selected.
+          <p>Open the export dialog and choose a destination.</p>
+        </div>
+        <div class="log-entry">
+          <span class="tag">HTML</span>
+          <p>This area can contain arbitrary HTML logs, including <strong>bold text</strong>, <a href="#" style="color:#93c5fd;">links</a>, and inline <code>code</code>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
