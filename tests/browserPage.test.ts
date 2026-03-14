@@ -22,4 +22,16 @@ describe('browserPage', () => {
     expect(html).toContain('preferDownloadedUserGames: true');
     expect(html).not.toContain('state.preferDownloadedUserGames = false;');
   });
+
+  it('shows completion chrome only for explicit refreshes', () => {
+    const html = renderBrowserPage({
+      lichessUser: 'lichess-user',
+      chessComUser: 'chesscom-user',
+    });
+
+    expect(html).toContain('showCompletionState: Boolean(options.forceRefresh)');
+    expect(html).toContain('if (showCompletionState) {');
+    expect(html).toContain('cycle.root.insertBefore(container, cycle.logs);');
+    expect(html).not.toContain('root.appendChild(progress);');
+  });
 });

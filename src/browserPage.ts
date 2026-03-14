@@ -648,9 +648,10 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         return stripAnsi(text).replace(/\\r/g, '');
       }
 
-      function createAssistantCycle() {
+      function createAssistantCycle(options) {
         const root = document.createElement('div');
         root.className = 'message-assistant assistant-cycle';
+        const showCompletionState = Boolean(options && options.showCompletionState);
 
         const meta = document.createElement('div');
         meta.className = 'assistant-meta';
@@ -688,8 +689,9 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
 
         meta.appendChild(title);
         meta.appendChild(status);
-        root.appendChild(meta);
-        root.appendChild(progress);
+        if (showCompletionState) {
+          root.appendChild(meta);
+        }
         root.appendChild(logs);
         root.appendChild(results);
         content.appendChild(root);
@@ -697,12 +699,15 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
 
         return {
           root: root,
+          meta: meta,
           title: title,
           status: status,
           progress: progress,
           logLines: logLines,
           logs: logs,
           results: results,
+          showCompletionState: showCompletionState,
+          progressMounted: false,
         };
       }
 
@@ -795,7 +800,12 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         return details.join(' | ');
       }
 
-      function renderProgressItem(container, update) {
+      function renderProgressItem(cycle, update) {
+        const container = cycle.progress;
+        if (!cycle.progressMounted) {
+          cycle.root.insertBefore(container, cycle.logs);
+          cycle.progressMounted = true;
+        }
         let item = container._items.get(update.key);
         if (!item) {
           const root = document.createElement('div');
@@ -844,6 +854,10 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
       function renderResult(cycle, result) {
         cycle.results.hidden = false;
         cycle.results.innerHTML = '';
+        if (cycle.progressMounted && (!cycle.progress._items || cycle.progress._items.size === 0)) {
+          cycle.progress.remove();
+          cycle.progressMounted = false;
+        }
 
         const sessionLabel = document.createElement('div');
         sessionLabel.className = 'section-label';
@@ -900,8 +914,10 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         cycle.results.appendChild(tableLabel);
         cycle.results.appendChild(tablePre);
 
-        cycle.title.textContent = 'Evaluation complete';
-        cycle.status.textContent = 'Board and table rendered from backend text output.';
+        if (cycle.showCompletionState) {
+          cycle.title.textContent = 'Evaluation complete';
+          cycle.status.textContent = 'Board and table rendered from backend text output.';
+        }
 
         state.history = Array.isArray(result.history) ? result.history.slice() : [];
         state.preferDownloadedUserGames = Boolean(result.userGamesPrimed);
@@ -941,7 +957,7 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         }
 
         if (event.type === 'progress') {
-          renderProgressItem(cycle.progress, event);
+          renderProgressItem(cycle, event);
           cycle.status.textContent = 'Receiving progress updates...';
           return;
         }
@@ -961,6 +977,12 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         }
 
         if (event.type === 'done') {
+          if (!cycle.showCompletionState) {
+            if (cycle.progressMounted && (!cycle.progress._items || cycle.progress._items.size === 0)) {
+              cycle.progress.remove();
+              cycle.progressMounted = false;
+            }
+          }
           cycle.status.textContent = state.latestJobId === jobId ? 'Done.' : cycle.status.textContent;
           closeEventSource();
           state.activeJobId = null;
@@ -1025,7 +1047,9 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         };
 
         appendUserMessage(options.bubbleText);
-        const cycle = createAssistantCycle();
+        const cycle = createAssistantCycle({
+          showCompletionState: Boolean(options.forceRefresh),
+        });
 
         try {
           setBusy(true);
