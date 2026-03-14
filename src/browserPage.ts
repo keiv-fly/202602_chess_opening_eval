@@ -402,11 +402,15 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
       position: sticky;
       top: 0;
       background: var(--surface);
-      text-align: left;
+      text-align: right;
       color: var(--muted);
       font-size: 12px;
       letter-spacing: 0.02em;
       white-space: normal;
+    }
+
+    .stats-table td {
+      text-align: right;
     }
 
     .stats-table tbody tr:last-child td {
@@ -425,6 +429,7 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
     .stats-table .col-move {
       width: 1px;
       white-space: nowrap;
+      text-align: left;
     }
 
     .stats-table .col-eval,
@@ -438,18 +443,21 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
       display: grid;
       gap: 2px;
       min-width: 0;
+      justify-items: end;
+      text-align: right;
     }
 
     .stats-cell-main {
       font-family: var(--mono);
-      white-space: normal;
+      white-space: pre-wrap;
     }
 
     .stats-cell-sub {
+      font-family: var(--mono);
       color: var(--muted);
       font-size: 12px;
       line-height: 1.4;
-      white-space: normal;
+      white-space: pre-wrap;
     }
 
     .stats-table-empty {
@@ -751,7 +759,7 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
 
       function formatPercentValue(value) {
         const formatted = value.toFixed(1);
-        return formatted === '100.0' ? '100' : formatted;
+        return (formatted === '100.0' ? '100' : formatted).padStart(4, ' ');
       }
 
       function formatPercent(part, total) {
@@ -876,16 +884,16 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
 
         const main = document.createElement('div');
         main.className = 'stats-cell-main';
-        main.textContent = formatMoveCount(stats.total, abbreviateThousands) + ' / ' + formatPercent(stats.total, columnTotal) + '%';
+        main.textContent = formatMoveCount(stats.total, abbreviateThousands) + '/' + formatPercent(stats.total, columnTotal) + '%';
 
         const split = document.createElement('div');
         split.className = 'stats-cell-sub';
         split.textContent =
           'W/D/L ' +
           formatPercent(stats.white, stats.total) +
-          ' / ' +
+          '/' +
           formatPercent(stats.draws, stats.total) +
-          ' / ' +
+          '/' +
           formatPercent(stats.black, stats.total);
 
         const score = document.createElement('div');
