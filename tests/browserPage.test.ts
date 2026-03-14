@@ -47,6 +47,22 @@ describe('browserPage', () => {
     expect(html).not.toContain('result.boardText');
   });
 
+  it('renders board coordinates with square pseudo-elements', () => {
+    const html = renderBrowserPage({
+      lichessUser: 'lichess-user',
+      chessComUser: 'chesscom-user',
+    });
+    const css = readBrowserPageCss();
+
+    expect(html).toContain("const FILE_LABELS = 'abcdefgh';");
+    expect(html).toContain('data-file="');
+    expect(html).toContain('data-rank="');
+    expect(css).toContain('.fen-square[data-file]::before');
+    expect(css).toContain('content: attr(data-file);');
+    expect(css).toContain('.fen-square[data-rank]::after');
+    expect(css).toContain('content: attr(data-rank);');
+  });
+
   it('scrolls the finished evaluation to the top of the result card', () => {
     const html = renderBrowserPage({
       lichessUser: 'lichess-user',

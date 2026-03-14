@@ -355,9 +355,44 @@
     }
 
     .fen-square {
+      position: relative;
       display: flex;
       align-items: center;
       justify-content: center;
+      overflow: hidden;
+    }
+
+    .fen-square::before,
+    .fen-square::after {
+      position: absolute;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1;
+      user-select: none;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    .fen-square[data-file]::before {
+      content: attr(data-file);
+      left: 4px;
+      bottom: 3px;
+    }
+
+    .fen-square[data-rank]::after {
+      content: attr(data-rank);
+      top: 3px;
+      right: 4px;
+    }
+
+    .fen-square.light::before,
+    .fen-square.light::after {
+      color: #b58863;
+    }
+
+    .fen-square.dark::before,
+    .fen-square.dark::after {
+      color: #f0d9b5;
     }
 
     .fen-square.light {
@@ -374,6 +409,8 @@
       object-fit: contain;
       user-select: none;
       pointer-events: none;
+      position: relative;
+      z-index: 1;
     }
 
     .stats-table-wrap {
