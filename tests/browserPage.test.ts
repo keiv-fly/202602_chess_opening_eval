@@ -34,4 +34,15 @@ describe('browserPage', () => {
     expect(html).toContain('cycle.root.insertBefore(container, cycle.logs);');
     expect(html).not.toContain('root.appendChild(progress);');
   });
+
+  it('renders merged statistics with an html table', () => {
+    const html = renderBrowserPage({
+      lichessUser: 'lichess-user',
+      chessComUser: 'chesscom-user',
+    });
+
+    expect(html).toContain("function createMergedStatsTable(rows)");
+    expect(html).toContain("table.className = 'stats-table';");
+    expect(html).not.toContain("tablePre.textContent = normalizeTerminalText(result.tableText);");
+  });
 });

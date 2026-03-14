@@ -339,14 +339,6 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
       min-width: 0;
     }
 
-    .result-meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      color: var(--muted);
-      font-size: 14px;
-    }
-
     .mono-output {
       display: block;
       width: 100%;
@@ -366,6 +358,113 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
 
     .mono-output.is-board {
       overflow-x: visible;
+    }
+
+    .stats-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--surface-strong);
+    }
+
+    .stats-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      table-layout: auto;
+    }
+
+    .stats-table col.col-move,
+    .stats-table col.col-eval,
+    .stats-table col.col-user,
+    .stats-table col.col-pot {
+      width: 1px;
+    }
+
+    .stats-table th,
+    .stats-table td {
+      padding: 8px 4px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+      min-width: 0;
+    }
+
+    .stats-table tr > :first-child {
+      padding-left: 8px;
+    }
+
+    .stats-table tr > :last-child {
+      padding-right: 8px;
+    }
+
+    .stats-table th {
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+      text-align: left;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.02em;
+      white-space: normal;
+    }
+
+    .stats-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .stats-table td.is-num,
+    .stats-table th.is-num {
+      text-align: right;
+    }
+
+    .stats-table td.is-mono {
+      font-family: var(--mono);
+    }
+
+    .stats-table .col-move {
+      width: 1px;
+      white-space: nowrap;
+    }
+
+    .stats-table .col-eval,
+    .stats-table .col-user,
+    .stats-table .col-pot {
+      width: 1px;
+      white-space: nowrap;
+    }
+
+    .stats-cell {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .stats-cell-main {
+      font-family: var(--mono);
+      white-space: normal;
+    }
+
+    .stats-cell-sub {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: normal;
+    }
+
+    .stats-table-empty {
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .pot-positive {
+      color: var(--success);
+      font-weight: 600;
+    }
+
+    .pot-negative {
+      color: var(--danger);
+      font-weight: 600;
     }
 
     .fen-line {
@@ -502,7 +601,7 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
     <main class="content-wrap">
       <div class="content" id="content">
         <div class="message-assistant assistant-intro">
-          This browser UI keeps the board and move table as plain text output while streaming backend logs and progress in real time.
+          This browser UI keeps the board as plain text, renders merged statistics as an HTML table, and streams backend logs and progress in real time.
         </div>
         <div class="message-assistant">
           The composer below now works like the original CLI: answer each prompt in order, then use SAN moves, \`c\` to export CSV, \`u\` to refresh user games, or send an empty input to go back one move.
@@ -646,6 +745,256 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
 
       function normalizeTerminalText(text) {
         return stripAnsi(text).replace(/\\r/g, '');
+      }
+
+      const LICHESS_CP_TO_WIN_PROBABILITY_K = 0.00368208;
+
+      function formatPercentValue(value) {
+        const formatted = value.toFixed(1);
+        return formatted === '100.0' ? '100' : formatted;
+      }
+
+      function formatPercent(part, total) {
+        if (!total || total <= 0) {
+          return '--.-';
+        }
+        return formatPercentValue((part / total) * 100);
+      }
+
+      function formatEvalCell(evalValue) {
+        if (!evalValue) {
+          return {
+            main: 'nan',
+            sub: 'WW --.-%',
+          };
+        }
+
+        if (typeof evalValue.cp === 'number') {
+          const depthSuffix = typeof evalValue.depth === 'number' ? '/' + String(evalValue.depth) : '';
+          const winChancePercent = (1 / (1 + Math.exp(-LICHESS_CP_TO_WIN_PROBABILITY_K * evalValue.cp))) * 100;
+          return {
+            main: (evalValue.cp / 100).toFixed(2) + depthSuffix,
+            sub: 'WW ' + winChancePercent.toFixed(1) + '%',
+          };
+        }
+
+        if (typeof evalValue.mate === 'number') {
+          const mateDepthSuffix = typeof evalValue.depth === 'number' ? '/' + String(evalValue.depth) : '';
+          return {
+            main: 'M' + String(evalValue.mate) + mateDepthSuffix,
+            sub: 'WW --.-%',
+          };
+        }
+
+        return {
+          main: 'nan',
+          sub: 'WW --.-%',
+        };
+      }
+
+      function statsScoreRate(stats) {
+        if (!stats || stats.total <= 0) {
+          return null;
+        }
+        return (stats.white + stats.draws / 2) / stats.total;
+      }
+
+      function evalWhiteWinRate(evalValue) {
+        if (!evalValue || typeof evalValue.cp !== 'number') {
+          return null;
+        }
+        return 1 / (1 + Math.exp(-LICHESS_CP_TO_WIN_PROBABILITY_K * evalValue.cp));
+      }
+
+      function combineUserStatsForRow(row) {
+        const lichessUser = row && row.lichessUser ? row.lichessUser : null;
+        const chessComUser = row && row.chessComUser ? row.chessComUser : null;
+        const combinedTotal = (lichessUser ? lichessUser.total : 0) + (chessComUser ? chessComUser.total : 0);
+        if (combinedTotal <= 0) {
+          return null;
+        }
+
+        return {
+          san: row.san,
+          total: combinedTotal,
+          white: (lichessUser ? lichessUser.white : 0) + (chessComUser ? chessComUser.white : 0),
+          draws: (lichessUser ? lichessUser.draws : 0) + (chessComUser ? chessComUser.draws : 0),
+          black: (lichessUser ? lichessUser.black : 0) + (chessComUser ? chessComUser.black : 0),
+        };
+      }
+
+      function calculateMovePotential(row, sourceTotals) {
+        const lichessUser = row && row.lichessUser ? row.lichessUser : null;
+        const chessComUser = row && row.chessComUser ? row.chessComUser : null;
+        const lichessDb = row && row.lichessDb ? row.lichessDb : null;
+        const moveCombinedTotal = (lichessUser ? lichessUser.total : 0) + (chessComUser ? chessComUser.total : 0);
+        const actualScoreRate =
+          moveCombinedTotal > 0
+            ? (
+                (lichessUser ? lichessUser.white : 0) +
+                (lichessUser ? lichessUser.draws : 0) / 2 +
+                (chessComUser ? chessComUser.white : 0) +
+                (chessComUser ? chessComUser.draws : 0) / 2
+              ) / moveCombinedTotal
+            : 0;
+        const dbGames = lichessDb ? lichessDb.total : 0;
+        const dbScoreRate = statsScoreRate(lichessDb);
+        const evalScoreRate = evalWhiteWinRate(row ? row.eval : null);
+        const baseScoreRate = dbGames >= 20 ? dbScoreRate : (evalScoreRate !== null ? evalScoreRate : dbScoreRate);
+        const allUserGames = sourceTotals.lichessUser + sourceTotals.chessComUser;
+        const moveShare = allUserGames > 0 ? moveCombinedTotal / allUserGames : 0;
+        const potential = (actualScoreRate - (baseScoreRate !== null ? baseScoreRate : 0)) * moveShare * 10000;
+        return Math.abs(potential) < 0.05 ? 0 : potential;
+      }
+
+      function formatMoveCount(total, abbreviateThousands) {
+        if (!abbreviateThousands) {
+          return String(total);
+        }
+        return String(Math.floor(total / 1000)) + 'k';
+      }
+
+      function createTextCell(tagName, text, className) {
+        const cell = document.createElement(tagName);
+        if (className) {
+          cell.className = className;
+        }
+        cell.textContent = text;
+        return cell;
+      }
+
+      function createStatsSourceCell(stats, columnTotal, abbreviateThousands) {
+        const cell = document.createElement('td');
+        if (!stats || stats.total <= 0) {
+          cell.className = 'is-mono';
+          cell.textContent = '--';
+          return cell;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'stats-cell';
+
+        const main = document.createElement('div');
+        main.className = 'stats-cell-main';
+        main.textContent = formatMoveCount(stats.total, abbreviateThousands) + ' / ' + formatPercent(stats.total, columnTotal) + '%';
+
+        const split = document.createElement('div');
+        split.className = 'stats-cell-sub';
+        split.textContent =
+          'W/D/L ' +
+          formatPercent(stats.white, stats.total) +
+          ' / ' +
+          formatPercent(stats.draws, stats.total) +
+          ' / ' +
+          formatPercent(stats.black, stats.total);
+
+        const score = document.createElement('div');
+        score.className = 'stats-cell-sub';
+        score.textContent = 'Score ' + formatPercent(stats.white + stats.draws / 2, stats.total);
+
+        wrapper.appendChild(main);
+        wrapper.appendChild(split);
+        wrapper.appendChild(score);
+        cell.appendChild(wrapper);
+        return cell;
+      }
+
+      function createMergedStatsTable(rows) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'stats-table-wrap';
+
+        const table = document.createElement('table');
+        table.className = 'stats-table';
+
+        const colgroup = document.createElement('colgroup');
+        ['col-move', 'col-eval', '', '', 'col-user', '', 'col-pot'].forEach(function (className) {
+          const col = document.createElement('col');
+          if (className) {
+            col.className = className;
+          }
+          colgroup.appendChild(col);
+        });
+        table.appendChild(colgroup);
+
+        const thead = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        const headers = [
+          { label: 'mv.', className: 'col-move' },
+          { label: 'Eval', className: 'is-num col-eval' },
+          { label: 'Lichess user', className: '' },
+          { label: 'Chess.com user', className: '' },
+          { label: 'User', className: 'is-num col-user' },
+          { label: 'Lichess DB', className: '' },
+          { label: 'Pot.', className: 'is-num col-pot' },
+        ];
+
+        headers.forEach(function (header) {
+          headRow.appendChild(createTextCell('th', header.label, header.className));
+        });
+        thead.appendChild(headRow);
+
+        const tbody = document.createElement('tbody');
+        const safeRows = Array.isArray(rows) ? rows : [];
+        const lichessUserTotal = safeRows.reduce(function (sum, row) {
+          return sum + (row && row.lichessUser ? row.lichessUser.total : 0);
+        }, 0);
+        const chessComTotal = safeRows.reduce(function (sum, row) {
+          return sum + (row && row.chessComUser ? row.chessComUser.total : 0);
+        }, 0);
+        const lichessDbTotal = safeRows.reduce(function (sum, row) {
+          return sum + (row && row.lichessDb ? row.lichessDb.total : 0);
+        }, 0);
+        const lichessDbTopTotal = safeRows.length > 0 && safeRows[0] && safeRows[0].lichessDb ? safeRows[0].lichessDb.total : 0;
+        const useThousandsForLichessDb = lichessDbTopTotal >= 1000000;
+        const sourceTotals = {
+          lichessUser: lichessUserTotal,
+          chessComUser: chessComTotal,
+        };
+
+        if (safeRows.length === 0) {
+          const emptyRow = document.createElement('tr');
+          const emptyCell = createTextCell('td', 'No moves found.', 'stats-table-empty');
+          emptyCell.colSpan = 7;
+          emptyRow.appendChild(emptyCell);
+          tbody.appendChild(emptyRow);
+        }
+
+        safeRows.forEach(function (row) {
+          const tr = document.createElement('tr');
+          const evalCell = formatEvalCell(row.eval);
+          const evalTd = document.createElement('td');
+          evalTd.className = 'is-num is-mono col-eval';
+
+          const evalMain = document.createElement('div');
+          evalMain.className = 'stats-cell-main';
+          evalMain.textContent = evalCell.main;
+
+          const evalSub = document.createElement('div');
+          evalSub.className = 'stats-cell-sub';
+          evalSub.textContent = evalCell.sub;
+
+          evalTd.appendChild(evalMain);
+          evalTd.appendChild(evalSub);
+
+          const userStats = combineUserStatsForRow(row);
+          const userScoreText = userStats ? formatPercent(userStats.white + userStats.draws / 2, userStats.total) : '--.-';
+          const potValue = calculateMovePotential(row, sourceTotals);
+          const potClassName = potValue > 0 ? 'is-num is-mono pot-positive' : (potValue < 0 ? 'is-num is-mono pot-negative' : 'is-num is-mono');
+
+          tr.appendChild(createTextCell('td', row.san, 'is-mono col-move'));
+          tr.appendChild(evalTd);
+          tr.appendChild(createStatsSourceCell(row.lichessUser, lichessUserTotal, false));
+          tr.appendChild(createStatsSourceCell(row.chessComUser, chessComTotal, false));
+          tr.appendChild(createTextCell('td', userScoreText, 'is-num is-mono col-user'));
+          tr.appendChild(createStatsSourceCell(row.lichessDb, lichessDbTotal, useThousandsForLichessDb));
+          tr.appendChild(createTextCell('td', potValue.toFixed(1), potClassName + ' col-pot'));
+          tbody.appendChild(tr);
+        });
+
+        table.appendChild(thead);
+        table.appendChild(tbody);
+        wrapper.appendChild(table);
+        return wrapper;
       }
 
       function createAssistantCycle(options) {
@@ -867,20 +1216,18 @@ export function renderBrowserPage(bootstrap: BrowserPageBootstrap): string {
         tableLabel.className = 'section-label';
         tableLabel.textContent = 'Merged Statistics';
 
-        const tablePre = document.createElement('pre');
-        tablePre.className = 'mono-output';
-        tablePre.textContent = normalizeTerminalText(result.tableText);
+        const tableView = createMergedStatsTable(result.rows);
 
         cycle.results.appendChild(fenLabel);
         cycle.results.appendChild(fenLine);
         cycle.results.appendChild(boardLabel);
         cycle.results.appendChild(boardPre);
         cycle.results.appendChild(tableLabel);
-        cycle.results.appendChild(tablePre);
+        cycle.results.appendChild(tableView);
 
         if (cycle.showCompletionState) {
           cycle.title.textContent = 'Evaluation complete';
-          cycle.status.textContent = 'Board and table rendered from backend text output.';
+          cycle.status.textContent = 'Board rendered from backend text; statistics rendered as an HTML table.';
         }
 
         state.history = Array.isArray(result.history) ? result.history.slice() : [];
