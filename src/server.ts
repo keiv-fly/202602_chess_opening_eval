@@ -2,7 +2,7 @@ import * as dotenv from 'dotenv';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { renderBrowserPage } from './browserPage.js';
+import { readBrowserPageCss, renderBrowserPage } from './browserPage.js';
 import { OpeningEvaluator } from './openingEvaluator.js';
 import type { EvaluatePositionRequest, EvaluatePositionResult, UiEvent } from './types.js';
 
@@ -46,6 +46,11 @@ function writeJson(response: ServerResponse, statusCode: number, payload: unknow
 function writeHtml(response: ServerResponse, html: string): void {
   response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   response.end(html);
+}
+
+function writeCss(response: ServerResponse, css: string): void {
+  response.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
+  response.end(css);
 }
 
 async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
@@ -163,6 +168,11 @@ function handleSse(request: IncomingMessage, response: ServerResponse, jobId: st
 const server = createServer(async (request, response) => {
   const method = request.method ?? 'GET';
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+
+  if (method === 'GET' && url.pathname === '/browser/browserPage.css') {
+    writeCss(response, readBrowserPageCss());
+    return;
+  }
 
   if (method === 'GET' && url.pathname === '/') {
     writeHtml(
